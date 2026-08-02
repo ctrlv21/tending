@@ -68,5 +68,5 @@ export default defineConfig(({ mode }) => {
       .filter(([key]) => key.startsWith("VITE_"))
       .map(([key, value]) => [`import.meta.env.${key}`, JSON.stringify(value)]),
   );
-  return { plugins: [react(), localApi()], define: publicEnv };
+  return { plugins: [react(), localApi()], define: { ...publicEnv, __TENDING_RELEASE__: JSON.stringify(process.env.VERCEL_DEPLOYMENT_ID ?? new Date().toISOString()) } };
 });

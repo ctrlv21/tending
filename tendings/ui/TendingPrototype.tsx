@@ -3,6 +3,8 @@ import type { User } from "@supabase/supabase-js";
 import "./tending.css";
 import { tendingSupabase } from "./supabase";
 
+declare const __TENDING_RELEASE__: string;
+
 type Bucket = "needs_reply" | "unread" | "waiting" | "handled";
 type Source = "Gmail" | "X DM";
 type Priority = "urgent" | "reply" | "watch";
@@ -156,9 +158,9 @@ export default function TendingPrototype() {
   useEffect(() => {
     document.title = "Tending";
   }, []);
-  const [conversations, setConversations] = useState(INITIAL_CONVERSATIONS);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeView, setActiveView] = useState<Bucket>("needs_reply");
-  const [selectedId, setSelectedId] = useState("maya");
+  const [selectedId, setSelectedId] = useState("");
   const [detailOpen, setDetailOpen] = useState(false);
   const [snoozeMenu, setSnoozeMenu] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -170,10 +172,10 @@ export default function TendingPrototype() {
   const [x, setX] = useState<XStatus | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [showPreview, setShowPreview] = useState(false);
   const [priorityPeople, setPriorityPeople] = useState<PriorityPerson[]>([]);
   const [priorityDraft, setPriorityDraft] = useState("");
   const [prioritySuggestions, setPrioritySuggestions] = useState<PrioritySuggestion[]>([]);
+  const [priorityLookupMessage, setPriorityLookupMessage] = useState<string | null>(null);
   const [priorityBusy, setPriorityBusy] = useState(false);
   const [watchWords, setWatchWords] = useState<Record<"gmail" | "x", WatchKeyword[]>>({ gmail: [], x: [] });
   const [watchDrafts, setWatchDrafts] = useState<Record<"gmail" | "x", string>>({ gmail: "", x: "" });
@@ -229,14 +231,18 @@ export default function TendingPrototype() {
   useEffect(() => {
     if (!user || priorityDraft.trim().length < 2) {
       setPrioritySuggestions([]);
+      setPriorityLookupMessage(null);
       return;
     }
     let cancelled = false;
     const timeout = window.setTimeout(() => {
       void gmailFetch(`/api/tending/priorities?search=${encodeURIComponent(priorityDraft.trim())}`).then(async (response) => {
-        const payload = await response.json() as { suggestions?: PrioritySuggestion[] };
-        if (!cancelled && response.ok) setPrioritySuggestions(payload.suggestions ?? []);
-      }).catch(() => { if (!cancelled) setPrioritySuggestions([]); });
+        const payload = await response.json() as { suggestions?: PrioritySuggestion[]; lookupMessage?: string | null; error?: string };
+        if (!cancelled) {
+          setPrioritySuggestions(response.ok ? payload.suggestions ?? [] : []);
+          setPriorityLookupMessage(response.ok ? payload.lookupMessage ?? null : payload.error ?? "Contact lookup could not run.");
+        }
+      }).catch(() => { if (!cancelled) { setPrioritySuggestions([]); setPriorityLookupMessage("Contact lookup could not run."); } });
     }, 180);
     return () => { cancelled = true; window.clearTimeout(timeout); };
   }, [priorityDraft, user?.id]);
@@ -251,11 +257,22 @@ export default function TendingPrototype() {
   }, [user?.id]);
 
   useEffect(() => {
+    if (!authReady || !user) return;
+    const key = `tending-auto-sync:${user.id}:${__TENDING_RELEASE__}`;
+    if (window.sessionStorage.getItem(key)) return;
+    window.sessionStorage.setItem(key, "started");
+    void Promise.all(["/api/tending/gmail/sync", "/api/tending/x/sync"].map(async (path) => {
+      const response = await gmailFetch(path, { method: "POST" });
+      return response.ok;
+    })).then((results) => { if (results.some(Boolean)) window.setTimeout(() => window.location.reload(), 500); }).catch(() => { /* Manual Refresh all remains available. */ });
+  }, [authReady, user?.id]);
+
+  useEffect(() => {
     if (!authReady) return;
     if (!user) {
       setGmail(null);
-      setConversations(INITIAL_CONVERSATIONS);
-      setSelectedId("maya");
+      setConversations([]);
+      setSelectedId("");
       return;
     }
     let cancelled = false;
@@ -539,7 +556,7 @@ export default function TendingPrototype() {
     } catch (error) { setToast(error instanceof Error ? error.message : "Could not remove this watch word."); }
   }
 
-  if (!user && !showPreview) {
+  if (!user) {
     return <main className="landing-shell">
       <header className="landing-nav">
         <a className="tending-wordmark" href="/" aria-label="Tending home">tending<span>·</span></a>
@@ -551,7 +568,7 @@ export default function TendingPrototype() {
           <h1>A few things <em>need you.</em></h1>
           <p className="landing-intro">Tending watches the messages that would otherwise slip through, then leaves you with one small, considered queue.</p>
           <div className="landing-connect"><p>Choose what to connect first</p><div><button className="landing-primary" onClick={() => signIn("gmail")}>Connect Gmail <span>↗</span></button><button className="landing-source" onClick={() => signIn("x")}>Connect X DMs <span>↗</span></button></div></div>
-          <button className="landing-secondary" onClick={() => setShowPreview(true)}>See the desk <span>↓</span></button><p className="landing-note">Connect either, or both · read-only · no sending on your behalf</p>
+          <button className="landing-secondary" onClick={() => window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" })}>See how it works <span>↓</span></button><p className="landing-note">Connect either, or both · read-only · no sending on your behalf</p>
         </div>
         <div className="landing-window" aria-label="A preview of the Tending queue">
           <div className="glass-topline"><span><i /> Today, quietly</span><span>03 waiting</span></div>
@@ -645,7 +662,7 @@ export default function TendingPrototype() {
         <p className="eyebrow">YOUR BOUNDARIES</p><h2 id="settings-title">A little help, on your terms.</h2><p className="settings-intro">Tending only reminds you about conversations you connect. It never sends, archives, or changes anything.</p>
         <div className="setting-row"><div><b>Desktop reminders</b><small>{notificationState === "enabled" ? "Enabled — your test reminder was sent." : notificationState === "blocked" ? "Permission wasn’t granted. You can enable it in your browser settings." : "Get a small desktop nudge when something needs you."}</small></div><button className={notificationState === "enabled" ? "setting-button on" : "setting-button"} onClick={enableNotifications}>{notificationState === "enabled" ? "Enabled" : "Try a reminder"}</button></div>
         <div className="setting-row"><div><b>Quiet hours</b><small>Hold ordinary reminders from 10 PM until 8 AM.</small></div><button className={quietHours ? "switch on" : "switch"} onClick={() => setQuietHours(!quietHours)} aria-label="Toggle quiet hours"><i /></button></div>
-        <div className="setting-row priority-setting"><div><b>Priority people</b><small>Search a recent sender and choose their email. They receive a stronger Gmail signal; no messages are sent or changed.</small><div className="priority-editor"><input value={priorityDraft} onChange={(event) => setPriorityDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addPriorityPerson(); }} placeholder="Search a recent sender" aria-label="Search a recent Gmail sender" /><button className="text-action" onClick={() => void addPriorityPerson()} disabled={!priorityDraft.trim() || priorityBusy}>{priorityBusy ? "Saving…" : "Add"}</button></div>{prioritySuggestions.length > 0 && <div className="priority-suggestions" role="listbox">{prioritySuggestions.map((person) => <button key={person.identifier} role="option" onClick={() => void addPriorityPerson(person)}><b>{person.label}</b><small>{person.identifier}</small><span>+</span></button>)}</div>}{priorityPeople.length ? <div className="priority-chips" aria-label="Priority people">{priorityPeople.map((person) => <span key={person.id}>{person.label}<button onClick={() => void removePriorityPerson(person.id)} aria-label={`Remove ${person.label}`}>×</button></span>)}</div> : <p className="priority-empty">Add someone above, then refresh Gmail to apply it to your recent inbox.</p>}</div></div>
+        <div className="setting-row priority-setting"><div><b>Priority people</b><small>Search Google Contacts and choose their email. They receive a stronger Gmail signal; no messages are sent or changed.</small><div className="priority-editor"><input value={priorityDraft} onChange={(event) => { setPriorityDraft(event.target.value); setPriorityLookupMessage(null); }} onKeyDown={(event) => { if (event.key === "Enter") void addPriorityPerson(); }} placeholder="Search a name or email" aria-label="Search Google Contacts" /><button className="text-action" onClick={() => void addPriorityPerson()} disabled={!priorityDraft.trim() || priorityBusy}>{priorityBusy ? "Saving…" : "Add"}</button></div>{prioritySuggestions.length > 0 && <div className="priority-suggestions" role="listbox">{prioritySuggestions.map((person) => <button key={person.identifier} role="option" onClick={() => void addPriorityPerson(person)}><b>{person.label}</b><small>{person.identifier}</small><span>+</span></button>)}</div>}{priorityLookupMessage && <p className="priority-empty priority-lookup-message">{priorityLookupMessage}</p>}{priorityPeople.length ? <div className="priority-chips" aria-label="Priority people">{priorityPeople.map((person) => <span key={person.id}>{person.label}<button onClick={() => void removePriorityPerson(person.id)} aria-label={`Remove ${person.label}`}>×</button></span>)}</div> : <p className="priority-empty">Add someone above, then refresh Gmail to apply it to your recent inbox.</p>}</div></div>
         {(["gmail", "x"] as const).map((source) => <div key={source} className="setting-row priority-setting"><div><b>{source === "gmail" ? "Gmail watch words" : "X watch words"}</b><small>Words or short phrases that should make a human message more likely to surface.</small><div className="priority-editor"><input value={watchDrafts[source]} onChange={(event) => setWatchDrafts((current) => ({ ...current, [source]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter") void addWatchWord(source); }} placeholder={source === "gmail" ? "e.g. partnership, contract" : "e.g. project, collaboration"} aria-label={`Add a ${source} watch word`} /><button className="text-action" onClick={() => void addWatchWord(source)} disabled={!watchDrafts[source].trim()}>Add</button></div>{watchWords[source].length ? <div className="priority-chips">{watchWords[source].map((word) => <span key={word.id}>{word.phrase}<button onClick={() => void removeWatchWord(source, word.id)} aria-label={`Remove ${word.phrase}`}>×</button></span>)}</div> : <p className="priority-empty">No watch words yet.</p>}</div></div>)}
         <div className="connection-row"><span className="connection-icon gmail">M</span><div><b>Connected sources</b><small>{gmail?.connected ? `${gmail.emails?.length ?? 1} Gmail account${(gmail.emails?.length ?? 1) === 1 ? "" : "s"} connected${x?.connected ? " · X DMs connected" : ""}` : x?.connected ? "X DMs connected" : "Choose Gmail, X DMs, or both."}</small></div><button onClick={() => { setSettingsOpen(false); setConnectionsOpen(true); }}>Manage</button></div>
       </section></div>}
