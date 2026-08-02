@@ -1,10 +1,10 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServerSupabaseClient } from "../../server/supabaseServer.js";
 import { analyzeMessages, type MessageAnalysis } from "./messageAnalysis.js";
 
-type RequestLike = { headers?: Record<string, string | string[] | undefined>; query?: Record<string, string | string[] | undefined> };
+type RequestLike = { headers?: Record<string, string | string[] | undefined>; query?: Record<string, string | string[] | undefined>; method?: string; body?: unknown; [Symbol.asyncIterator]?: () => AsyncIterator<Buffer | string> };
 type ResponseLike = { status: (code: number) => ResponseLike; json: (payload: unknown) => unknown; redirect: (code: number, location: string) => unknown; setHeader: (name: string, value: string | string[]) => void };
-type Config = { clientId: string; clientSecret: string; encryptionKey: string; supabaseUrl: string; serviceKey: string };
+type Config = { clientId: string; clientSecret: string; encryptionKey: string; supabaseUrl: string; serviceKey: string; appBearerToken: string | null };
 type Connection = { owner_id: string; x_user_id: string; username: string | null; access_token_encrypted: string; refresh_token_encrypted: string | null; token_expires_at: string; status: string; last_synced_at: string | null };
 
 const STATE_TTL_MS = 10 * 60 * 1000;
@@ -21,7 +21,7 @@ function getConfig(): Config {
   const serviceKey = String(process.env.TENDING_SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
   if (!clientId || !clientSecret || !encryptionKey || !supabaseUrl || !serviceKey) throw new Error("X is not configured.");
   if (encryptionKey.length < 32) throw new Error("TOKEN_ENCRYPTION_KEY must contain at least 32 characters.");
-  return { clientId, clientSecret, encryptionKey, supabaseUrl, serviceKey };
+  return { clientId, clientSecret, encryptionKey, supabaseUrl, serviceKey, appBearerToken: String(process.env.X_APP_BEARER_TOKEN ?? "").trim() || null };
 }
 function db(config: Config) { return createServerSupabaseClient(config.supabaseUrl, config.serviceKey); }
 function encrypt(value: string, secret: string) { const key = createHash("sha256").update(secret).digest(); const iv = randomBytes(12); const cipher = createCipheriv("aes-256-gcm", key, iv); const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]); return `v1.${base64url(iv)}.${base64url(cipher.getAuthTag())}.${base64url(ciphertext)}`; }
@@ -32,6 +32,7 @@ async function currentUser(request: RequestLike, config: Config) { const token =
 async function connection(ownerId: string, config: Config) { const { data, error } = await db(config).from("tending_x_connections").select("*").eq("owner_id", ownerId).maybeSingle(); if (error) throw error; return data as Connection | null; }
 async function accessToken(item: Connection, config: Config) { if (new Date(item.token_expires_at).getTime() > Date.now() + 60_000) return decrypt(item.access_token_encrypted, config.encryptionKey); if (!item.refresh_token_encrypted) throw new Error("X needs to be reconnected."); const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: decrypt(item.refresh_token_encrypted, config.encryptionKey), client_id: config.clientId }); const response = await fetch("https://api.x.com/2/oauth2/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: `Basic ${Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64")}` }, body }); const token = await response.json() as { access_token?: string; refresh_token?: string; expires_in?: number; error?: string }; if (!response.ok || !token.access_token) throw new Error(token.error || "X token refresh failed."); await db(config).from("tending_x_connections").update({ access_token_encrypted: encrypt(token.access_token, config.encryptionKey), refresh_token_encrypted: token.refresh_token ? encrypt(token.refresh_token, config.encryptionKey) : item.refresh_token_encrypted, token_expires_at: new Date(Date.now() + (token.expires_in ?? 7200) * 1000).toISOString(), updated_at: new Date().toISOString() }).eq("owner_id", item.owner_id); return token.access_token; }
 type XEvent = { id: string; sender_id?: string; text?: string; created_at?: string; dm_conversation_id?: string; participant_ids?: string[] };
+type XActivityEvent = { data?: { event_uuid?: string; event_type?: "chat.received" | "chat.sent" | string; filter?: { user_id?: string }; payload?: { id?: string; sender_id?: string; conversation_id?: string; created_at_msec?: string } } };
 type XUser = { id: string; name?: string; username?: string; verified?: boolean; description?: string; public_metrics?: { followers_count?: number; following_count?: number } };
 type Classification = "needs_reply" | "worth_a_look" | "filtered" | "not_pending";
 
@@ -127,9 +128,125 @@ async function testXFeedForOwner(ownerId: string, config: Config) {
   return { ok: apiResponse.ok, status: apiResponse.status, eventCount: payload.data?.length ?? 0, newestEventAt: timestamps[timestamps.length - 1] ?? null, requestId: apiResponse.headers.get("x-request-id") || apiResponse.headers.get("x-transaction-id"), error: apiResponse.ok ? null : payload.errors?.[0]?.detail || payload.errors?.[0]?.title || "X rejected the test request." };
 }
 
+function xActivityTag(ownerId: string, eventType: "chat.received" | "chat.sent") { return `tending:${ownerId}:${eventType}`; }
+function activityError(payload: unknown, fallback: string) {
+  const value = payload as { errors?: Array<{ detail?: string; title?: string }>; detail?: string; title?: string; message?: string };
+  return value.errors?.[0]?.detail || value.errors?.[0]?.title || value.detail || value.title || value.message || fallback;
+}
+async function xJson(response: globalThis.Response) { return response.json().catch(() => ({})) as Promise<any>; }
+
+async function ensureActivitySubscriptions(ownerId: string, item: Connection, userToken: string, config: Config) {
+  if (!config.appBearerToken) return { enabled: false, reason: "Add X_APP_BEARER_TOKEN to enable live XChat events." };
+  const webhookUrl = callbackUrl({ headers: {} });
+  const bearerHeaders = { Authorization: `Bearer ${config.appBearerToken}`, "Content-Type": "application/json" };
+  const listed = await fetch("https://api.x.com/2/webhooks", { headers: bearerHeaders });
+  const listedPayload = await xJson(listed) as { data?: Array<{ id?: string; url?: string; valid?: boolean }> };
+  if (!listed.ok) throw new Error(activityError(listedPayload, "X could not list Activity webhooks."));
+  let webhook = listedPayload.data?.find((candidate) => candidate.url === webhookUrl);
+  if (!webhook) {
+    const created = await fetch("https://api.x.com/2/webhooks", { method: "POST", headers: bearerHeaders, body: JSON.stringify({ url: webhookUrl }) });
+    const createdPayload = await xJson(created) as { data?: { id?: string; url?: string; valid?: boolean } };
+    if (!created.ok || !createdPayload.data?.id) throw new Error(activityError(createdPayload, "X could not register Tending's webhook."));
+    webhook = createdPayload.data;
+  }
+  if (!webhook.id || webhook.valid === false) throw new Error("X did not validate Tending's webhook.");
+  const subscriptionsResponse = await fetch("https://api.x.com/2/activity/subscriptions", { headers: bearerHeaders });
+  const subscriptionsPayload = await xJson(subscriptionsResponse) as { data?: Array<{ event_type?: string; filter?: { user_id?: string }; webhook_id?: string }> };
+  if (!subscriptionsResponse.ok) throw new Error(activityError(subscriptionsPayload, "X could not list Activity subscriptions."));
+  const existing = subscriptionsPayload.data ?? [];
+  for (const eventType of ["chat.received", "chat.sent"] as const) {
+    if (existing.some((subscription) => subscription.event_type === eventType && subscription.filter?.user_id === item.x_user_id && subscription.webhook_id === webhook?.id)) continue;
+    // Chat events are private, so the connected person's OAuth token authorizes this subscription.
+    const response = await fetch("https://api.x.com/2/activity/subscriptions", { method: "POST", headers: { Authorization: `Bearer ${userToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ event_type: eventType, filter: { user_id: item.x_user_id }, tag: xActivityTag(ownerId, eventType), webhook_id: webhook.id }) });
+    const payload = await xJson(response);
+    if (!response.ok) throw new Error(activityError(payload, `X could not subscribe to ${eventType}.`));
+  }
+  return { enabled: true, webhookId: webhook.id };
+}
+
+async function rawBody(request: RequestLike) {
+  if (typeof request.body === "string") return request.body;
+  if (Buffer.isBuffer(request.body)) return request.body.toString("utf8");
+  if (request.body && typeof request.body === "object") return JSON.stringify(request.body);
+  if (!request[Symbol.asyncIterator]) return "";
+  const chunks: Buffer[] = [];
+  for await (const chunk of request as AsyncIterable<Buffer | string>) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
+}
+function validWebhookSignature(raw: string, signature: string | undefined, secret: string) {
+  if (!signature) return false;
+  const expected = `sha256=${createHmac("sha256", secret).update(raw).digest("base64")}`;
+  const left = Buffer.from(expected); const right = Buffer.from(signature);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+async function senderForActivity(senderId: string | undefined, connectionRow: Connection, config: Config) {
+  if (!senderId) return undefined;
+  try {
+    const token = await accessToken(connectionRow, config);
+    const response = await fetch(`https://api.x.com/2/users/${senderId}?user.fields=name,username,verified,description,public_metrics`, { headers: { Authorization: `Bearer ${token}` } });
+    const payload = await xJson(response) as { data?: XUser };
+    return response.ok ? payload.data : undefined;
+  } catch { return undefined; }
+}
+async function recordActivityEvent(event: XActivityEvent, config: Config) {
+  const data = event.data;
+  const payload = data?.payload;
+  const ownerXId = data?.filter?.user_id;
+  if (!data || !payload || !ownerXId || (data.event_type !== "chat.received" && data.event_type !== "chat.sent")) return;
+  const { data: item } = await db(config).from("tending_x_connections").select("*").eq("x_user_id", ownerXId).eq("status", "connected").maybeSingle();
+  const connectionRow = item as Connection | null;
+  if (!connectionRow) return;
+  const createdAt = payload.created_at_msec ? new Date(Number(payload.created_at_msec)).toISOString() : new Date().toISOString();
+  if (data.event_type === "chat.sent") {
+    if (payload.conversation_id) await db(config).from("tending_x_events").update({ reply_worthy: false, classification: "not_pending", updated_at: createdAt }).eq("owner_id", connectionRow.owner_id).eq("conversation_id", payload.conversation_id).eq("inbound", true);
+    return;
+  }
+  const sender = await senderForActivity(payload.sender_id, connectionRow, config);
+  const eventId = `xchat:${data.event_uuid || payload.id || createHash("sha256").update(`${payload.sender_id}:${payload.conversation_id}:${createdAt}`).digest("hex")}`;
+  const { data: priorityPeople } = await db(config).from("tending_priority_people").select("normalized_identifier").eq("owner_id", connectionRow.owner_id);
+  const priorityIdentifiers = new Set((priorityPeople ?? []).map((person) => String(person.normalized_identifier)));
+  const isPriority = priorityIdentifiers.has((sender?.username ?? "").toLowerCase()) || priorityIdentifiers.has((sender?.name ?? "").toLowerCase());
+  const { error } = await db(config).from("tending_x_events").upsert({ owner_id: connectionRow.owner_id, x_event_id: eventId, conversation_id: payload.conversation_id ?? null, sender_id: payload.sender_id ?? null, sender_name: sender?.name || sender?.username || "X user", text: "New encrypted X message — open X to read it.", created_at_x: createdAt, inbound: true, reply_worthy: true, classification: "needs_reply", relevance_score: isPriority ? 10 : sender?.verified ? 6 : 4, spam_score: 0, sender_followed: false, keyword_match: false, analysis_reason: isPriority ? "Priority person sent a new encrypted X message." : "New encrypted X message received live.", analysis_provider: null, analyzed_at: null, source_url: "https://x.com/messages", updated_at: new Date().toISOString() }, { onConflict: "owner_id,x_event_id" });
+  if (error) throw error;
+}
+
 export async function xStatus(request: RequestLike, response: ResponseLike) { let config: Config; try { config = getConfig(); } catch (error) { return response.status(200).json({ configured: false, connected: false, status: "setup_required", message: error instanceof Error ? error.message : "X is not configured." }); } try { const user = await currentUser(request, config); if (first(request.query?.test) === "1") { const result = await testXFeedForOwner(user.id, config); response.setHeader("Cache-Control", "no-store"); return response.status(result.ok ? 200 : 400).json(result); } const item = await connection(user.id, config); const { data: latest } = await db(config).from("tending_x_events").select("created_at_x").eq("owner_id", user.id).eq("inbound", true).order("created_at_x", { ascending: false }).limit(1).maybeSingle(); const latestEventAt = latest?.created_at_x ?? null; const delayed = Boolean(latestEventAt && Date.now() - new Date(latestEventAt).getTime() > 36 * 3_600_000); response.setHeader("Cache-Control", "no-store"); return response.status(200).json({ configured: true, connected: item?.status === "connected", status: item?.status ?? "not_connected", username: item?.username ?? null, lastSyncedAt: item?.last_synced_at ?? null, latestEventAt, dataFreshness: !item ? "not_connected" : !latestEventAt ? "no_messages" : delayed ? "delayed" : "current" }); } catch (error) { response.setHeader("Cache-Control", "no-store"); return response.status(200).json({ configured: true, connected: false, status: "sign_in_required", message: error instanceof Error ? error.message : "Sign in is required before connecting X." }); } }
 export async function xStart(request: RequestLike, response: ResponseLike) { try { const config = getConfig(); const user = await currentUser(request, config); const state = base64url(randomBytes(32)); const verifier = base64url(randomBytes(48)); const redirectUri = callbackUrl(request); const { error } = await db(config).from("tending_x_oauth_states").insert({ state_hash: digest(state), owner_id: user.id, code_verifier_encrypted: encrypt(verifier, config.encryptionKey), redirect_uri: redirectUri, expires_at: new Date(Date.now() + STATE_TTL_MS).toISOString() }); if (error) throw error; const query = new URLSearchParams({ response_type: "code", client_id: config.clientId, redirect_uri: redirectUri, scope: X_SCOPE, state, code_challenge: digest(verifier), code_challenge_method: "S256" }); return response.status(200).json({ authorizationUrl: `https://x.com/i/oauth2/authorize?${query}` }); } catch (error) { return response.status(500).json({ error: error instanceof Error ? error.message : "Could not start X connection." }); } }
-export async function xCallback(request: RequestLike, response: ResponseLike) { const code = first(request.query?.code); const state = first(request.query?.state); if (!code || !state || first(request.query?.error)) return response.redirect(302, `${appUrl(request)}/?x=cancelled`); try { const config = getConfig(); const { data: stateRow, error } = await db(config).from("tending_x_oauth_states").delete().eq("state_hash", digest(state)).select("owner_id, code_verifier_encrypted, redirect_uri, expires_at").maybeSingle(); if (error || !stateRow || new Date(stateRow.expires_at).getTime() < Date.now()) throw new Error("Your X connection link expired. Please try again."); const body = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: stateRow.redirect_uri, code_verifier: decrypt(stateRow.code_verifier_encrypted, config.encryptionKey), client_id: config.clientId }); const tokenResponse = await fetch("https://api.x.com/2/oauth2/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: `Basic ${Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64")}` }, body }); const token = await tokenResponse.json() as { access_token?: string; refresh_token?: string; expires_in?: number; error?: string }; if (!tokenResponse.ok || !token.access_token) throw new Error(token.error || "X did not return an access token."); const meResponse = await fetch("https://api.x.com/2/users/me?user.fields=name,username", { headers: { Authorization: `Bearer ${token.access_token}` } }); const me = await meResponse.json() as { data?: { id?: string; name?: string; username?: string } }; if (!meResponse.ok || !me.data?.id) throw new Error("X profile could not be read."); const now = new Date().toISOString(); const { error: upsertError } = await db(config).from("tending_x_connections").upsert({ owner_id: stateRow.owner_id, x_user_id: me.data.id, username: me.data.username ?? null, display_name: me.data.name ?? null, access_token_encrypted: encrypt(token.access_token, config.encryptionKey), refresh_token_encrypted: token.refresh_token ? encrypt(token.refresh_token, config.encryptionKey) : null, token_expires_at: new Date(Date.now() + (token.expires_in ?? 7200) * 1000).toISOString(), status: "connected", connected_at: now, updated_at: now }, { onConflict: "owner_id" }); if (upsertError) throw upsertError; await syncX(stateRow.owner_id, config); return response.redirect(302, `${appUrl(request)}/?x=connected`); } catch (error) { return response.redirect(302, `${appUrl(request)}/?x=error&message=${encodeURIComponent(error instanceof Error ? error.message : "X connection failed.")}`); } }
+export async function xCallback(request: RequestLike, response: ResponseLike) {
+  const config = getConfig();
+  const crcToken = first(request.query?.crc_token);
+  if (request.method === "GET" && crcToken) return response.status(200).json({ response_token: `sha256=${createHmac("sha256", config.clientSecret).update(crcToken).digest("base64")}` });
+  if (request.method === "POST") {
+    const raw = await rawBody(request);
+    const signature = first(request.headers?.["x-twitter-webhooks-signature"]);
+    if (!validWebhookSignature(raw, signature, config.clientSecret)) return response.status(401).json({ error: "Invalid X webhook signature." });
+    try { await recordActivityEvent(JSON.parse(raw) as XActivityEvent, config); return response.status(200).json({ received: true }); }
+    catch (error) { return response.status(500).json({ error: error instanceof Error ? error.message : "Could not process X Activity event." }); }
+  }
+  const code = first(request.query?.code); const state = first(request.query?.state);
+  if (!code || !state || first(request.query?.error)) return response.redirect(302, `${appUrl(request)}/?x=cancelled`);
+  try {
+    const { data: stateRow, error } = await db(config).from("tending_x_oauth_states").delete().eq("state_hash", digest(state)).select("owner_id, code_verifier_encrypted, redirect_uri, expires_at").maybeSingle();
+    if (error || !stateRow || new Date(stateRow.expires_at).getTime() < Date.now()) throw new Error("Your X connection link expired. Please try again.");
+    const body = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: stateRow.redirect_uri, code_verifier: decrypt(stateRow.code_verifier_encrypted, config.encryptionKey), client_id: config.clientId });
+    const tokenResponse = await fetch("https://api.x.com/2/oauth2/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: `Basic ${Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64")}` }, body });
+    const token = await tokenResponse.json() as { access_token?: string; refresh_token?: string; expires_in?: number; error?: string };
+    if (!tokenResponse.ok || !token.access_token) throw new Error(token.error || "X did not return an access token.");
+    const meResponse = await fetch("https://api.x.com/2/users/me?user.fields=name,username", { headers: { Authorization: `Bearer ${token.access_token}` } });
+    const me = await meResponse.json() as { data?: { id?: string; name?: string; username?: string } };
+    if (!meResponse.ok || !me.data?.id) throw new Error("X profile could not be read.");
+    const now = new Date().toISOString();
+    const connectionRow: Connection = { owner_id: stateRow.owner_id, x_user_id: me.data.id, username: me.data.username ?? null, access_token_encrypted: encrypt(token.access_token, config.encryptionKey), refresh_token_encrypted: token.refresh_token ? encrypt(token.refresh_token, config.encryptionKey) : null, token_expires_at: new Date(Date.now() + (token.expires_in ?? 7200) * 1000).toISOString(), status: "connected", last_synced_at: null };
+    const { error: upsertError } = await db(config).from("tending_x_connections").upsert({ ...connectionRow, display_name: me.data.name ?? null, connected_at: now, updated_at: now }, { onConflict: "owner_id" });
+    if (upsertError) throw upsertError;
+    // A legacy-feed refresh remains a best-effort fallback. Live Activity setup is
+    // deliberately non-blocking so a missing X entitlement never breaks OAuth.
+    await syncX(stateRow.owner_id, config);
+    const activity = await ensureActivitySubscriptions(stateRow.owner_id, connectionRow, token.access_token, config).catch((activityError) => ({ enabled: false, reason: activityError instanceof Error ? activityError.message : "Live XChat setup could not be completed." }));
+    const params = activity.enabled ? "?x=connected&xchat=live" : `?x=connected&xchat=setup_required&message=${encodeURIComponent(activity.reason ?? "Add X Activity access to enable live XChat updates.")}`;
+    return response.redirect(302, `${appUrl(request)}/${params}`);
+  } catch (error) { return response.redirect(302, `${appUrl(request)}/?x=error&message=${encodeURIComponent(error instanceof Error ? error.message : "X connection failed.")}`); }
+}
 export async function syncX(ownerId: string, config: Config) {
   const item = await connection(ownerId, config);
   if (!item || item.status !== "connected") throw new Error("X is not connected.");
@@ -175,7 +292,7 @@ export async function syncX(ownerId: string, config: Config) {
   // occasionally returned a partial/stale DM feed, so preserve the last
   // known queue until it returns at least one event we can reconcile.
   if (rows.length) {
-    const { error: clearError } = await db(config).from("tending_x_events").update({ reply_worthy: false, classification: "not_pending", updated_at: now }).eq("owner_id", ownerId);
+    const { error: clearError } = await db(config).from("tending_x_events").update({ reply_worthy: false, classification: "not_pending", updated_at: now }).eq("owner_id", ownerId).not("x_event_id", "like", "xchat:%");
     if (clearError) throw clearError;
   }
   if (rows.length) {

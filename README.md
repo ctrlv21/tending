@@ -15,4 +15,12 @@ Deploy to Vercel with the variables in `.env.example`. Set `TENDING_APP_URL` to 
 - `https://your-domain/api/tending/gmail/callback`
 - `https://your-domain/api/tending/x/callback`
 
+### Live encrypted XChat updates
+
+Tending uses the same X callback URL as a signed X Activity webhook. Add a server-only
+`X_APP_BEARER_TOKEN` in Vercel, enable X Activity/Webhooks for the app, then reconnect X.
+Tending will register the webhook and subscribe the connected user to `chat.received` and
+`chat.sent`. XChat bodies are end-to-end encrypted; Tending stores only the sender,
+conversation metadata and timestamp, then links the user to X to read or reply.
+
 OAuth tokens are encrypted at rest with `TOKEN_ENCRYPTION_KEY`; never commit `.env.local`.
