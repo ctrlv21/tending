@@ -470,7 +470,7 @@ export default function TendingPrototype() {
   async function testXFeed() {
     setXTesting(true);
     try {
-      const response = await gmailFetch("/api/tending/x/test", { method: "POST" });
+      const response = await gmailFetch("/api/tending/x/status?test=1");
       const result = await response.json() as { ok: boolean; eventCount?: number; newestEventAt?: string | null; requestId?: string | null; error?: string };
       setToast(result.ok ? `Official X test: ${result.eventCount ?? 0} events; newest ${result.newestEventAt ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(result.newestEventAt)) : "timestamp unavailable"}.${result.requestId ? ` Request ${result.requestId}.` : ""}` : result.error ?? "X API test could not run.");
     } catch { setToast("X API test could not run right now."); } finally { setXTesting(false); }
