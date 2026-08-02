@@ -591,7 +591,7 @@ export default function TendingPrototype() {
       <header className="tending-topbar">
         <a className="tending-wordmark" href="/" aria-label="Tending home">tending<span>·</span></a>
         <div className="tending-date">Tuesday, July 28</div>
-        <div className="tending-status"><i /> {user ? `${[gmail?.connected ? "Gmail" : null, x?.connected ? "X" : null].filter(Boolean).join(" + ") || user.email || "Signed in"}${gmail?.connected || x?.connected ? " connected" : ""}` : "Private by default"} <button onClick={() => setSettingsOpen(true)} aria-label="Open settings">Settings</button><button onClick={user ? signOut : () => signIn()}>{user ? "Sign out" : "Sign in"}</button></div>
+        <div className="tending-status"><i /> {user ? `${[gmail?.connected ? "Gmail" : null, x?.connected ? "X" : null].filter(Boolean).join(" + ") || user.email || "Signed in"}${gmail?.connected || x?.connected ? " connected" : ""}` : "Private by default"} <button onClick={() => setSettingsOpen(true)} aria-label="Open settings">Settings</button><button onClick={user ? signOut : () => signIn()}>{user ? "Sign out of Tending" : "Sign in"}</button></div>
       </header>
 
       <div className="tending-layout">

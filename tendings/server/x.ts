@@ -73,11 +73,12 @@ function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefi
   const following = sender?.public_metrics?.following_count ?? 0;
   const credibleUnfollowedSender = Boolean(sender?.verified || (followers >= 50 && following <= Math.max(300, followers * 4)));
   const humanAsk = directAsk && risk < 2;
+  const ageHours = Math.max(0, (Date.now() - new Date(event.created_at ?? Date.now()).getTime()) / 3_600_000);
   let relevance = (senderFollowed ? 5 : 0) + (directAsk ? 3 : 0) + (matchesKeyword ? 3 : 0) + (credibleUnfollowedSender ? 1 : 0);
   if (sender?.verified) relevance += 1;
   if ((sender?.public_metrics?.followers_count ?? 0) > 100) relevance += 1;
   relevance -= risk;
-  const deterministic: Classification = !isLatestInbound
+  const deterministic: Classification = !isLatestInbound || (ageHours > 96 && !matchesKeyword)
     ? "not_pending"
     : risk >= 2
       ? "filtered"
@@ -86,7 +87,16 @@ function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefi
         : matchesKeyword
           ? "worth_a_look"
           : "filtered";
-  const classification: Classification = !isLatestInbound || !analysis ? deterministic : analysis.urgency === "ignore" ? "filtered" : analysis.urgency === "urgent" || analysis.urgency === "reply" ? "needs_reply" : "worth_a_look";
+  // The action queue is deliberately strict. A contextual "watch" is useful
+  // signal, but should not become another inbox unless the user asked us to
+  // watch for that phrase. Old messages are likewise held out by default.
+  const classification: Classification = !isLatestInbound || ageHours > 96 && !matchesKeyword || !analysis
+    ? deterministic
+    : analysis.urgency === "ignore"
+      ? "filtered"
+      : analysis.urgency === "urgent" || analysis.urgency === "reply"
+        ? "needs_reply"
+        : matchesKeyword ? "worth_a_look" : "filtered";
   return { classification, relevance: Math.max(relevance, analysis?.score ?? 0), risk };
 }
 async function followedIds(token: string, userId: string) {
