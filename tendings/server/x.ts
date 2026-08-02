@@ -31,26 +31,47 @@ async function currentUser(request: RequestLike, config: Config) { const token =
 async function connection(ownerId: string, config: Config) { const { data, error } = await db(config).from("tending_x_connections").select("*").eq("owner_id", ownerId).maybeSingle(); if (error) throw error; return data as Connection | null; }
 async function accessToken(item: Connection, config: Config) { if (new Date(item.token_expires_at).getTime() > Date.now() + 60_000) return decrypt(item.access_token_encrypted, config.encryptionKey); if (!item.refresh_token_encrypted) throw new Error("X needs to be reconnected."); const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: decrypt(item.refresh_token_encrypted, config.encryptionKey), client_id: config.clientId }); const response = await fetch("https://api.x.com/2/oauth2/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: `Basic ${Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64")}` }, body }); const token = await response.json() as { access_token?: string; refresh_token?: string; expires_in?: number; error?: string }; if (!response.ok || !token.access_token) throw new Error(token.error || "X token refresh failed."); await db(config).from("tending_x_connections").update({ access_token_encrypted: encrypt(token.access_token, config.encryptionKey), refresh_token_encrypted: token.refresh_token ? encrypt(token.refresh_token, config.encryptionKey) : item.refresh_token_encrypted, token_expires_at: new Date(Date.now() + (token.expires_in ?? 7200) * 1000).toISOString(), updated_at: new Date().toISOString() }).eq("owner_id", item.owner_id); return token.access_token; }
 type XEvent = { id: string; sender_id?: string; text?: string; created_at?: string; dm_conversation_id?: string };
-type XUser = { id: string; name?: string; username?: string; verified?: boolean; public_metrics?: { followers_count?: number; following_count?: number } };
+type XUser = { id: string; name?: string; username?: string; verified?: boolean; description?: string; public_metrics?: { followers_count?: number; following_count?: number } };
 type Classification = "needs_reply" | "worth_a_look" | "filtered" | "not_pending";
 
 function hasReplySignal(text: string) { return /\?|\b(can you|could you|would you|please|let me know|thoughts\?|confirm|urgent|asap|deadline|today|tomorrow|time-sensitive|important|need your|action required)\b/i.test(text); }
 function spamScore(text: string) {
   const links = text.match(/https?:\/\/\S+/gi)?.length ?? 0;
   let score = links > 1 ? 3 : links === 1 ? 1 : 0;
-  if (/\b(airdrop|crypto|giveaway|investment opportunity|forex|onlyfans|telegram|whatsapp|make money|earn \$|sponsor(?:ship)?|promote|collab(?:oration)?|click (?:here|the link))\b/i.test(text)) score += 5;
+  if (/\b(airdrop|crypto|giveaway|investment opportunity|forex|onlyfans|telegram|whatsapp|make money|earn \$|sponsor(?:ship)?|promote|collab(?:oration)?|click (?:here|the link)|send me your (?:email|number)|paid partnership|brand deal|check my profile)\b/i.test(text)) score += 5;
   if (/\b(hello dear|kindly|congratulations[,!]? you(?:'ve| have) been selected)\b/i.test(text)) score += 3;
+  return score;
+}
+function botScore(sender: XUser | undefined) {
+  if (!sender) return 2;
+  const identity = `${sender.name ?? ""} ${sender.username ?? ""} ${sender.description ?? ""}`;
+  const followers = sender.public_metrics?.followers_count ?? 0;
+  const following = sender.public_metrics?.following_count ?? 0;
+  let score = 0;
+  if (/\b(bot|airdrop|crypto|trader|marketing|agency|growth|promo|support)\b/i.test(identity)) score += 3;
+  if (/\d{4,}$/.test(sender.username ?? "")) score += 1;
+  if (followers < 20 && following > 120) score += 2;
+  if (!sender.verified && followers < 8) score += 2;
   return score;
 }
 function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefined, isLatestInbound: boolean) {
   const text = event.text ?? "";
   const directAsk = hasReplySignal(text);
-  const risk = spamScore(text);
-  let relevance = (senderFollowed ? 4 : 0) + (directAsk ? 3 : 0);
+  const risk = spamScore(text) + botScore(sender);
+  const credibleUnfollowedSender = Boolean(sender?.verified || (sender?.public_metrics?.followers_count ?? 0) >= 40);
+  let relevance = (senderFollowed ? 5 : 0) + (directAsk ? 3 : 0) + (credibleUnfollowedSender ? 1 : 0);
   if (sender?.verified) relevance += 1;
   if ((sender?.public_metrics?.followers_count ?? 0) > 100) relevance += 1;
   relevance -= risk;
-  const classification: Classification = !isLatestInbound ? "not_pending" : risk >= 5 && relevance < 3 ? "filtered" : directAsk || (senderFollowed && relevance >= 4) ? "needs_reply" : relevance >= 1 ? "worth_a_look" : "filtered";
+  const classification: Classification = !isLatestInbound
+    ? "not_pending"
+    : risk >= 3 || (!senderFollowed && !credibleUnfollowedSender)
+      ? "filtered"
+      : senderFollowed && directAsk
+        ? "needs_reply"
+        : directAsk || senderFollowed
+          ? "worth_a_look"
+          : "filtered";
   return { classification, relevance, risk };
 }
 async function followedIds(token: string, userId: string) {
@@ -77,7 +98,7 @@ export async function syncX(ownerId: string, config: Config) {
   const item = await connection(ownerId, config);
   if (!item || item.status !== "connected") throw new Error("X is not connected.");
   const token = await accessToken(item, config);
-  const query = new URLSearchParams({ max_results: "100", event_types: "MessageCreate", "dm_event.fields": "created_at,dm_conversation_id,sender_id,text", expansions: "sender_id", "user.fields": "name,username,verified,public_metrics" });
+  const query = new URLSearchParams({ max_results: "100", event_types: "MessageCreate", "dm_event.fields": "created_at,dm_conversation_id,sender_id,text", expansions: "sender_id", "user.fields": "name,username,verified,description,public_metrics" });
   const response = await fetch(`https://api.x.com/2/dm_events?${query}`, { headers: { Authorization: `Bearer ${token}` } });
   const payload = await response.json() as { data?: XEvent[]; includes?: { users?: XUser[] }; errors?: Array<{ detail?: string }> };
   if (!response.ok) throw new Error(payload.errors?.[0]?.detail || "X direct messages could not be read.");

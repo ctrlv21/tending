@@ -167,6 +167,7 @@ export default function TendingPrototype() {
   const [x, setX] = useState<XStatus | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
 
   useEffect(() => {
     if (!tendingSupabase) {
@@ -404,6 +405,35 @@ export default function TendingPrototype() {
     } catch { setToast("Gmail could not refresh right now."); }
   }
 
+  if (!user && !showPreview) {
+    return <main className="landing-shell">
+      <header className="landing-nav">
+        <a className="tending-wordmark" href="/" aria-label="Tending home">tending<span>·</span></a>
+        <div className="landing-nav-right"><span>Private by default</span><button onClick={signIn}>Sign in <b>↗</b></button></div>
+      </header>
+      <section className="landing-hero">
+        <div className="landing-copy">
+          <p className="landing-kicker"><i /> A quieter way to keep up</p>
+          <h1>A few things <em>need you.</em></h1>
+          <p className="landing-intro">Tending watches the messages that would otherwise slip through, then leaves you with one small, considered queue.</p>
+          <div className="landing-actions"><button className="landing-primary" onClick={signIn}>Start tending <span>↗</span></button><button className="landing-secondary" onClick={() => setShowPreview(true)}>See the desk <span>↓</span></button></div>
+          <p className="landing-note">Gmail and X DMs · read-only · no sending on your behalf</p>
+        </div>
+        <div className="landing-window" aria-label="A preview of the Tending queue">
+          <div className="glass-topline"><span><i /> Today, quietly</span><span>03 waiting</span></div>
+          <div className="glass-title"><p>Your follow-through</p><h2>Worth<br/>coming back to.</h2></div>
+          <div className="glass-list">
+            <article><span className="glass-mark urgent">!</span><div><b>Maya Chen</b><strong>Revised contract</strong><p>Can you confirm the liability language before I send this to legal?</p></div><time>26h</time></article>
+            <article><span className="glass-mark">•</span><div><b>Alexis Park</b><strong>Deck for Thursday</strong><p>Would you have fifteen minutes before the investor meeting?</p></div><time>1d</time></article>
+            <article className="glass-muted"><span className="glass-mark">·</span><div><b>New DM</b><strong>Held out of your way</strong><p>Promotional messages do not enter the queue.</p></div></article>
+          </div>
+          <div className="glass-foot"><span>Only direct, human messages surface.</span><b>Open the desk ↗</b></div>
+        </div>
+      </section>
+      <section className="landing-principles" aria-label="Tending principles"><p><b>01</b> Finds direct asks, deadlines, and unfinished conversations.</p><p><b>02</b> Keeps marketing, bot-like DMs, and noise out.</p><p><b>03</b> Gives you the original message—not another place to reply.</p></section>
+    </main>;
+  }
+
   return (
     <main className="tending-shell">
       <header className="tending-topbar">
@@ -431,7 +461,7 @@ export default function TendingPrototype() {
           <div className="queue-heading">
             <div>
               <p className="eyebrow">{activeView === "needs_reply" ? "YOUR FOLLOW-THROUGH" : "TODAY'S INBOX"}</p>
-              <h1>{activeView === "needs_reply" && counts.needs_reply ? <>A small number of<br/><span className="heading-tail">things <em>need you.</em></span></> : activeView === "unread" ? <>New things, <em>no rush.</em></> : activeView === "waiting" ? <>You chose to <em>come back.</em></> : <>A little <em>lighter.</em></>}</h1>
+              <h1>{activeView === "needs_reply" && counts.needs_reply ? <>A small number of things <span className="heading-tail"><em>need&nbsp;you.</em></span></> : activeView === "unread" ? <>New things, <em>no rush.</em></> : activeView === "waiting" ? <>You chose to <em>come back.</em></> : <>A little <em>lighter.</em></>}</h1>
             </div>
             <button className="queue-refresh" onClick={gmail?.connected ? syncGmailNow : () => setToast("Connect Gmail when you’re ready — fixtures are shown for now.")}>↻ <span>Refresh</span></button>
           </div>
@@ -457,7 +487,7 @@ export default function TendingPrototype() {
           {selected ? <>
             <div className="detail-topline"><span className={`detail-priority ${selected.priority}`}>{priorityLabel(selected.priority)}</span><span>{selected.source}</span></div>
             <div className="detail-person"><div className="initials">{selected.initials}</div><div><h2>{selected.sender}</h2><p>{selected.age} · latest message</p></div></div>
-            <div className="detail-message"><h3>{selected.title}</h3><p>{selected.detail}</p>{selected.deadline && <div className="deadline">Deadline <b>{selected.deadline}</b></div>}</div>
+            <div className="detail-message"><p className="detail-preview-label">{selected.source === "Gmail" ? "Latest email preview" : "Latest direct message"}</p><h3>{selected.title}</h3><p>{selected.detail}</p>{selected.deadline && <div className="deadline">Deadline <b>{selected.deadline}</b></div>}</div>
             <div className="detail-reasons"><p className="eyebrow">WHY THIS SURFACED</p>{selected.reasons.map((reason) => <p key={reason}><i>+</i>{reason}</p>)}</div>
             {selected.bucket === "waiting" && <div className="detail-snoozed">Snoozed until <b>{selected.snoozeLabel}</b></div>}
             <div className="detail-actions">
