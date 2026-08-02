@@ -61,7 +61,7 @@ function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefi
   const risk = spamScore(text) + botScore(sender);
   const followers = sender?.public_metrics?.followers_count ?? 0;
   const following = sender?.public_metrics?.following_count ?? 0;
-  const credibleUnfollowedSender = Boolean(sender?.verified || (followers >= 100 && following <= followers * 3));
+  const credibleUnfollowedSender = Boolean(sender?.verified || (followers >= 50 && following <= Math.max(300, followers * 4)));
   const humanAsk = directAsk && credibleUnfollowedSender && risk < 2;
   let relevance = (senderFollowed ? 5 : 0) + (directAsk ? 3 : 0) + (matchesKeyword ? 3 : 0) + (credibleUnfollowedSender ? 1 : 0);
   if (sender?.verified) relevance += 1;
@@ -69,11 +69,11 @@ function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefi
   relevance -= risk;
   const classification: Classification = !isLatestInbound
     ? "not_pending"
-    : risk >= 2 || (!senderFollowed && !humanAsk)
+    : risk >= 2 || (!senderFollowed && !credibleUnfollowedSender)
       ? "filtered"
       : (senderFollowed && (directAsk || matchesKeyword)) || humanAsk
         ? "needs_reply"
-        : directAsk || senderFollowed || matchesKeyword
+        : directAsk || senderFollowed || matchesKeyword || credibleUnfollowedSender
           ? "worth_a_look"
           : "filtered";
   return { classification, relevance, risk };
@@ -102,12 +102,18 @@ export async function syncX(ownerId: string, config: Config) {
   const item = await connection(ownerId, config);
   if (!item || item.status !== "connected") throw new Error("X is not connected.");
   const token = await accessToken(item, config);
-  const query = new URLSearchParams({ max_results: "100", event_types: "MessageCreate", "dm_event.fields": "created_at,dm_conversation_id,sender_id,text", expansions: "sender_id", "user.fields": "name,username,verified,description,public_metrics" });
-  const response = await fetch(`https://api.x.com/2/dm_events?${query}`, { headers: { Authorization: `Bearer ${token}` } });
-  const payload = await response.json() as { data?: XEvent[]; includes?: { users?: XUser[] }; errors?: Array<{ detail?: string }> };
-  if (!response.ok) throw new Error(payload.errors?.[0]?.detail || "X direct messages could not be read.");
-  const events = payload.data ?? [];
-  const users = new Map((payload.includes?.users ?? []).map((person) => [person.id, person]));
+  const events: XEvent[] = []; const users = new Map<string, XUser>(); let paginationToken: string | undefined;
+  for (let page = 0; page < 5; page += 1) {
+    const query = new URLSearchParams({ max_results: "100", event_types: "MessageCreate", "dm_event.fields": "created_at,dm_conversation_id,sender_id,text", expansions: "sender_id", "user.fields": "name,username,verified,description,public_metrics" });
+    if (paginationToken) query.set("pagination_token", paginationToken);
+    const response = await fetch(`https://api.x.com/2/dm_events?${query}`, { headers: { Authorization: `Bearer ${token}` } });
+    const payload = await response.json() as { data?: XEvent[]; includes?: { users?: XUser[] }; errors?: Array<{ detail?: string }>; meta?: { next_token?: string } };
+    if (!response.ok) throw new Error(payload.errors?.[0]?.detail || "X direct messages could not be read.");
+    events.push(...(payload.data ?? []));
+    for (const person of payload.includes?.users ?? []) users.set(person.id, person);
+    paginationToken = payload.meta?.next_token;
+    if (!paginationToken) break;
+  }
   const follows = await followedIds(token, item.x_user_id);
   const { data: keywordRows } = await db(config).from("tending_watch_keywords").select("normalized_phrase").eq("owner_id", ownerId).eq("source", "x");
   const keywords = (keywordRows ?? []).map((row) => String(row.normalized_phrase));
