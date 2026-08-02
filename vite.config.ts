@@ -46,7 +46,17 @@ function localApi(): Plugin {
 }
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, ".", "");
+  // `vercel build` writes pulled production variables to `.vercel/`.
+  // Load that directory too so Vite can embed the explicitly public VITE_ values.
+  const env = {
+    ...loadEnv(mode, ".", ""),
+    ...loadEnv(mode, ".vercel", ""),
+  };
   Object.assign(process.env, Object.fromEntries(Object.entries(env).filter(([key]) => !process.env[key])));
-  return { plugins: [react(), localApi()] };
+  const publicEnv = Object.fromEntries(
+    Object.entries(env)
+      .filter(([key]) => key.startsWith("VITE_"))
+      .map(([key, value]) => [`import.meta.env.${key}`, JSON.stringify(value)]),
+  );
+  return { plugins: [react(), localApi()], define: publicEnv };
 });
