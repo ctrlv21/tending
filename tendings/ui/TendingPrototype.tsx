@@ -338,7 +338,7 @@ export default function TendingPrototype() {
     }
     const { error } = await tendingSupabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${window.location.origin}/tending` },
+      options: { redirectTo: window.location.origin },
     });
     if (error) setToast(error.message);
   }
@@ -407,7 +407,7 @@ export default function TendingPrototype() {
   return (
     <main className="tending-shell">
       <header className="tending-topbar">
-        <a className="tending-wordmark" href="/tending" aria-label="Tending home">tending<span>·</span></a>
+        <a className="tending-wordmark" href="/" aria-label="Tending home">tending<span>·</span></a>
         <div className="tending-date">Tuesday, July 28</div>
         <div className="tending-status"><i /> {user ? (gmail?.connected ? "Gmail connected" : user.email ?? "Signed in") : "Private by default"} <button onClick={() => setSettingsOpen(true)} aria-label="Open settings">Settings</button><button onClick={user ? signOut : signIn}>{user ? "Sign out" : "Sign in"}</button></div>
       </header>
