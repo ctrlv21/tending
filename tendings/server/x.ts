@@ -36,7 +36,15 @@ type Classification = "needs_reply" | "worth_a_look" | "filtered" | "not_pending
 
 function hasReplySignal(text: string) { return /\?|\b(can you|could you|would you|please|let me know|thoughts\?|confirm|urgent|asap|deadline|today|tomorrow|time-sensitive|important|need your|action required)\b/i.test(text); }
 function keywordMatch(text: string, words: string[]) { const lower = text.toLowerCase(); return words.some((word) => lower.includes(word)); }
-function conversationKey(event: XEvent) { return event.dm_conversation_id || (event.participant_ids?.length ? [...event.participant_ids].sort().join("-") : event.id); }
+function conversationKey(event: XEvent, ownerId: string) {
+  // X supplies a stable conversation ID for normal DMs.  For the occasional
+  // event without one, normalise all known participants (including ourselves)
+  // so an inbound/outbound pair still has one key instead of two event keys.
+  if (event.dm_conversation_id) return event.dm_conversation_id;
+  const participants = new Set([ownerId, event.sender_id ?? "", ...(event.participant_ids ?? [])]);
+  participants.delete("");
+  return participants.size > 1 ? [...participants].sort().join("-") : event.id;
+}
 function spamScore(text: string) {
   const links = text.match(/https?:\/\/\S+/gi)?.length ?? 0;
   let score = links > 1 ? 3 : links === 1 ? 1 : 0;
@@ -63,18 +71,18 @@ function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefi
   const followers = sender?.public_metrics?.followers_count ?? 0;
   const following = sender?.public_metrics?.following_count ?? 0;
   const credibleUnfollowedSender = Boolean(sender?.verified || (followers >= 50 && following <= Math.max(300, followers * 4)));
-  const humanAsk = directAsk && credibleUnfollowedSender && risk < 2;
+  const humanAsk = directAsk && risk < 2;
   let relevance = (senderFollowed ? 5 : 0) + (directAsk ? 3 : 0) + (matchesKeyword ? 3 : 0) + (credibleUnfollowedSender ? 1 : 0);
   if (sender?.verified) relevance += 1;
   if ((sender?.public_metrics?.followers_count ?? 0) > 100) relevance += 1;
   relevance -= risk;
   const classification: Classification = !isLatestInbound
     ? "not_pending"
-    : risk >= 2 || (!senderFollowed && !credibleUnfollowedSender)
+    : risk >= 2
       ? "filtered"
-      : (senderFollowed && (directAsk || matchesKeyword)) || humanAsk
+      : humanAsk
         ? "needs_reply"
-        : directAsk || senderFollowed || matchesKeyword || credibleUnfollowedSender
+        : matchesKeyword
           ? "worth_a_look"
           : "filtered";
   return { classification, relevance, risk };
@@ -120,7 +128,7 @@ export async function syncX(ownerId: string, config: Config) {
   const keywords = (keywordRows ?? []).map((row) => String(row.normalized_phrase));
   const latestByConversation = new Map<string, XEvent>();
   for (const event of events) {
-    const key = conversationKey(event);
+    const key = conversationKey(event, item.x_user_id);
     const existing = latestByConversation.get(key);
     if (!existing || new Date(event.created_at ?? 0).getTime() > new Date(existing.created_at ?? 0).getTime()) latestByConversation.set(key, event);
   }
@@ -128,7 +136,7 @@ export async function syncX(ownerId: string, config: Config) {
   const rows = events.map((event) => {
     const sender = users.get(event.sender_id ?? "");
     const inbound = event.sender_id !== item.x_user_id;
-    const isLatestInbound = latestByConversation.get(conversationKey(event))?.id === event.id && inbound;
+    const isLatestInbound = latestByConversation.get(conversationKey(event, item.x_user_id))?.id === event.id && inbound;
     const senderFollowed = Boolean(event.sender_id && follows.has(event.sender_id));
     const matchesKeyword = keywordMatch(event.text ?? "", keywords);
     const scored = classify(event, senderFollowed, sender, isLatestInbound, matchesKeyword);

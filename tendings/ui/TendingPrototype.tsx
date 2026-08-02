@@ -180,6 +180,7 @@ export default function TendingPrototype() {
   const [watchWords, setWatchWords] = useState<Record<"gmail" | "x", WatchKeyword[]>>({ gmail: [], x: [] });
   const [watchDrafts, setWatchDrafts] = useState<Record<"gmail" | "x", string>>({ gmail: "", x: "" });
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshEpoch, setRefreshEpoch] = useState(0);
 
   useEffect(() => {
     if (!tendingSupabase) {
@@ -264,7 +265,7 @@ export default function TendingPrototype() {
     void Promise.all(["/api/tending/gmail/sync", "/api/tending/x/sync"].map(async (path) => {
       const response = await gmailFetch(path, { method: "POST" });
       return response.ok;
-    })).then((results) => { if (results.some(Boolean)) window.setTimeout(() => window.location.reload(), 500); }).catch(() => { /* Manual Refresh all remains available. */ });
+    })).then((results) => { if (results.some(Boolean)) setRefreshEpoch((value) => value + 1); }).catch(() => { /* Manual Refresh all remains available. */ });
   }, [authReady, user?.id]);
 
   useEffect(() => {
@@ -283,8 +284,7 @@ export default function TendingPrototype() {
         if (cancelled) return;
         setGmail(status);
         if (!status.connected) {
-          setConversations([]);
-          setSelectedId("");
+          setConversations((current) => current.filter((conversation) => conversation.source !== "Gmail"));
           return;
         }
         const threadResponse = await gmailFetch("/api/tending/gmail/threads");
@@ -314,15 +314,15 @@ export default function TendingPrototype() {
             sourceUrl: thread.source_url,
           };
         });
-        setConversations(liveConversations);
-        setSelectedId(liveConversations[0]?.id ?? "");
+        setConversations((current) => [...current.filter((conversation) => conversation.source !== "Gmail"), ...liveConversations]);
+        setSelectedId((current) => current || liveConversations[0]?.id || "");
       } catch {
         if (!cancelled) setGmail({ configured: false, connected: false, status: "setup_required", email: null, lastSyncedAt: null, message: "Gmail setup is not complete." });
       }
     }
     void loadGmail();
     return () => { cancelled = true; };
-  }, [authReady, user?.id]);
+  }, [authReady, user?.id, refreshEpoch]);
 
   useEffect(() => {
     if (!authReady || !user) {
@@ -360,7 +360,7 @@ export default function TendingPrototype() {
     }
     void loadX();
     return () => { cancelled = true; };
-  }, [authReady, user?.id]);
+  }, [authReady, user?.id, refreshEpoch]);
 
   const counts = useMemo(() => {
     const count = (bucket: Bucket) => conversations.filter((conversation) => conversation.bucket === bucket).length;
@@ -472,7 +472,7 @@ export default function TendingPrototype() {
       const response = await gmailFetch("/api/tending/x/sync", { method: "POST" });
       const result = await response.json() as { synced: boolean; count?: number; error?: string };
       setToast(result.synced ? `X refreshed — ${result.count ?? 0} direct messages checked.` : result.error ?? "X could not refresh.");
-      if (result.synced) window.setTimeout(() => window.location.reload(), 450);
+      if (result.synced) setRefreshEpoch((value) => value + 1);
     } catch { setToast("X could not refresh right now."); }
   }
 
@@ -481,7 +481,7 @@ export default function TendingPrototype() {
       const response = await gmailFetch("/api/tending/gmail/sync", { method: "POST" });
       const result = await response.json() as { synced: boolean; count?: number; error?: string };
       setToast(result.synced ? `Gmail refreshed — ${result.count ?? 0} inbox threads checked.` : result.error ?? "Gmail could not refresh.");
-      if (result.synced) window.setTimeout(() => window.location.reload(), 450);
+      if (result.synced) setRefreshEpoch((value) => value + 1);
     } catch { setToast("Gmail could not refresh right now."); }
   }
 
@@ -499,7 +499,7 @@ export default function TendingPrototype() {
         return payload.synced ? `${source.label}: ${payload.count ?? 0}` : `${source.label}: not refreshed`;
       }));
       setToast(`Everything refreshed — ${results.join(" · ")}.`);
-      window.setTimeout(() => window.location.reload(), 650);
+      setRefreshEpoch((value) => value + 1);
     } catch { setToast("One of your sources could not refresh. Please try again."); }
     finally { setRefreshing(false); }
   }
