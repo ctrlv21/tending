@@ -44,6 +44,7 @@ create table if not exists public.tending_gmail_threads (
   importance_score integer not null default 0,
   urgency text not null default 'watch' check (urgency in ('urgent', 'reply', 'watch')),
   priority_person boolean not null default false,
+  keyword_match boolean not null default false,
   suppressed boolean not null default false,
   source_url text not null,
   updated_at timestamptz not null default now(),
@@ -90,6 +91,7 @@ create table if not exists public.tending_x_events (
   relevance_score integer not null default 0,
   spam_score integer not null default 0,
   sender_followed boolean not null default false,
+  keyword_match boolean not null default false,
   source_url text,
   updated_at timestamptz not null default now(),
   primary key (owner_id, x_event_id)
@@ -105,6 +107,18 @@ alter table public.tending_x_oauth_states enable row level security;
 alter table public.tending_x_connections enable row level security;
 alter table public.tending_x_events enable row level security;
 
+create table if not exists public.tending_watch_keywords (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references auth.users(id) on delete cascade,
+  source text not null check (source in ('gmail', 'x')),
+  phrase text not null,
+  normalized_phrase text not null,
+  created_at timestamptz not null default now(),
+  unique (owner_id, source, normalized_phrase)
+);
+create index if not exists tending_watch_keywords_owner_source_idx on public.tending_watch_keywords (owner_id, source);
+alter table public.tending_watch_keywords enable row level security;
+
 revoke all on table public.tending_profiles from anon, authenticated;
 revoke all on table public.tending_gmail_oauth_states from anon, authenticated;
 revoke all on table public.tending_gmail_connections from anon, authenticated;
@@ -112,6 +126,7 @@ revoke all on table public.tending_gmail_threads from anon, authenticated;
 revoke all on table public.tending_x_oauth_states from anon, authenticated;
 revoke all on table public.tending_x_connections from anon, authenticated;
 revoke all on table public.tending_x_events from anon, authenticated;
+revoke all on table public.tending_watch_keywords from anon, authenticated;
 
 create table if not exists public.tending_priority_people (
   id uuid primary key default gen_random_uuid(),

@@ -35,6 +35,7 @@ type XUser = { id: string; name?: string; username?: string; verified?: boolean;
 type Classification = "needs_reply" | "worth_a_look" | "filtered" | "not_pending";
 
 function hasReplySignal(text: string) { return /\?|\b(can you|could you|would you|please|let me know|thoughts\?|confirm|urgent|asap|deadline|today|tomorrow|time-sensitive|important|need your|action required)\b/i.test(text); }
+function keywordMatch(text: string, words: string[]) { const lower = text.toLowerCase(); return words.some((word) => lower.includes(word)); }
 function spamScore(text: string) {
   const links = text.match(/https?:\/\/\S+/gi)?.length ?? 0;
   let score = links > 1 ? 3 : links === 1 ? 1 : 0;
@@ -54,12 +55,12 @@ function botScore(sender: XUser | undefined) {
   if (!sender.verified && followers < 8) score += 2;
   return score;
 }
-function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefined, isLatestInbound: boolean) {
+function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefined, isLatestInbound: boolean, matchesKeyword: boolean) {
   const text = event.text ?? "";
   const directAsk = hasReplySignal(text);
   const risk = spamScore(text) + botScore(sender);
   const credibleUnfollowedSender = Boolean(sender?.verified || (sender?.public_metrics?.followers_count ?? 0) >= 40);
-  let relevance = (senderFollowed ? 5 : 0) + (directAsk ? 3 : 0) + (credibleUnfollowedSender ? 1 : 0);
+  let relevance = (senderFollowed ? 5 : 0) + (directAsk ? 3 : 0) + (matchesKeyword ? 3 : 0) + (credibleUnfollowedSender ? 1 : 0);
   if (sender?.verified) relevance += 1;
   if ((sender?.public_metrics?.followers_count ?? 0) > 100) relevance += 1;
   relevance -= risk;
@@ -67,9 +68,9 @@ function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefi
     ? "not_pending"
     : risk >= 3 || (!senderFollowed && !credibleUnfollowedSender)
       ? "filtered"
-      : senderFollowed && directAsk
+      : senderFollowed && (directAsk || matchesKeyword)
         ? "needs_reply"
-        : directAsk || senderFollowed
+        : directAsk || senderFollowed || matchesKeyword
           ? "worth_a_look"
           : "filtered";
   return { classification, relevance, risk };
@@ -105,6 +106,8 @@ export async function syncX(ownerId: string, config: Config) {
   const events = payload.data ?? [];
   const users = new Map((payload.includes?.users ?? []).map((person) => [person.id, person]));
   const follows = await followedIds(token, item.x_user_id);
+  const { data: keywordRows } = await db(config).from("tending_watch_keywords").select("normalized_phrase").eq("owner_id", ownerId).eq("source", "x");
+  const keywords = (keywordRows ?? []).map((row) => String(row.normalized_phrase));
   const latestByConversation = new Map<string, XEvent>();
   for (const event of events) {
     const key = event.dm_conversation_id ?? event.id;
@@ -117,8 +120,9 @@ export async function syncX(ownerId: string, config: Config) {
     const inbound = event.sender_id !== item.x_user_id;
     const isLatestInbound = latestByConversation.get(event.dm_conversation_id ?? event.id)?.id === event.id && inbound;
     const senderFollowed = Boolean(event.sender_id && follows.has(event.sender_id));
-    const scored = classify(event, senderFollowed, sender, isLatestInbound);
-    return { owner_id: ownerId, x_event_id: event.id, conversation_id: event.dm_conversation_id ?? null, sender_id: event.sender_id ?? null, sender_name: sender?.name || sender?.username || (inbound ? "X user" : "You"), text: event.text ?? "", created_at_x: event.created_at ?? now, inbound, reply_worthy: scored.classification === "needs_reply", classification: scored.classification, relevance_score: scored.relevance, spam_score: scored.risk, sender_followed: senderFollowed, source_url: event.dm_conversation_id ? `https://x.com/messages/${event.dm_conversation_id}` : "https://x.com/messages", updated_at: now };
+    const matchesKeyword = keywordMatch(event.text ?? "", keywords);
+    const scored = classify(event, senderFollowed, sender, isLatestInbound, matchesKeyword);
+    return { owner_id: ownerId, x_event_id: event.id, conversation_id: event.dm_conversation_id ?? null, sender_id: event.sender_id ?? null, sender_name: sender?.name || sender?.username || (inbound ? "X user" : "You"), text: event.text ?? "", created_at_x: event.created_at ?? now, inbound, reply_worthy: scored.classification === "needs_reply", classification: scored.classification, relevance_score: scored.relevance, spam_score: scored.risk, sender_followed: senderFollowed, keyword_match: matchesKeyword, source_url: event.dm_conversation_id ? `https://x.com/messages/${event.dm_conversation_id}` : "https://x.com/messages", updated_at: now };
   });
   const { error: clearError } = await db(config).from("tending_x_events").update({ reply_worthy: false, classification: "not_pending", updated_at: now }).eq("owner_id", ownerId);
   if (clearError) throw clearError;
@@ -130,4 +134,4 @@ export async function syncX(ownerId: string, config: Config) {
   return rows.filter((row) => row.classification !== "not_pending").length;
 }
 export async function xSync(request: RequestLike, response: ResponseLike) { try { const config = getConfig(); const user = await currentUser(request, config); return response.status(200).json({ synced: true, count: await syncX(user.id, config) }); } catch (error) { return response.status(400).json({ synced: false, error: error instanceof Error ? error.message : "X could not refresh." }); } }
-export async function xEvents(request: RequestLike, response: ResponseLike) { try { const config = getConfig(); const user = await currentUser(request, config); const { data, error } = await db(config).from("tending_x_events").select("x_event_id, sender_name, text, created_at_x, reply_worthy, classification, sender_followed, source_url").eq("owner_id", user.id).eq("inbound", true).in("classification", ["needs_reply", "worth_a_look"]).order("created_at_x", { ascending: false }).limit(100); if (error) throw error; return response.status(200).json({ events: data ?? [] }); } catch (error) { return response.status(400).json({ events: [], error: error instanceof Error ? error.message : "X messages could not be loaded." }); } }
+export async function xEvents(request: RequestLike, response: ResponseLike) { try { const config = getConfig(); const user = await currentUser(request, config); const { data, error } = await db(config).from("tending_x_events").select("x_event_id, sender_name, text, created_at_x, reply_worthy, classification, sender_followed, keyword_match, source_url").eq("owner_id", user.id).eq("inbound", true).in("classification", ["needs_reply", "worth_a_look"]).order("created_at_x", { ascending: false }).limit(100); if (error) throw error; return response.status(200).json({ events: data ?? [] }); } catch (error) { return response.status(400).json({ events: [], error: error instanceof Error ? error.message : "X messages could not be loaded." }); } }

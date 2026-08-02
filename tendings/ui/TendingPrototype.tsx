@@ -137,11 +137,12 @@ const VIEW_LABELS: Record<Bucket, string> = {
 };
 
 type GmailStatus = { configured: boolean; connected: boolean; status: string; email: string | null; lastSyncedAt: string | null; message?: string };
-type GmailThread = { gmail_thread_id: string; sender: string; subject: string; snippet: string; latest_message_at: string; unread: boolean; reply_worthy: boolean; source_url: string; importance_score: number; urgency: Priority; priority_person: boolean };
+type GmailThread = { gmail_thread_id: string; sender: string; subject: string; snippet: string; latest_message_at: string; unread: boolean; reply_worthy: boolean; source_url: string; importance_score: number; urgency: Priority; priority_person: boolean; keyword_match: boolean };
 type PriorityPerson = { id: string; identifier: string; label: string };
 type PrioritySuggestion = { identifier: string; label: string };
 type XStatus = { configured: boolean; connected: boolean; status: string; username: string | null; message?: string };
-type XEvent = { x_event_id: string; sender_name: string; text: string; created_at_x: string; reply_worthy: boolean; classification: "needs_reply" | "worth_a_look"; sender_followed: boolean; source_url: string };
+type XEvent = { x_event_id: string; sender_name: string; text: string; created_at_x: string; reply_worthy: boolean; classification: "needs_reply" | "worth_a_look"; sender_followed: boolean; keyword_match: boolean; source_url: string };
+type WatchKeyword = { id: string; phrase: string; source: "gmail" | "x" };
 
 function priorityLabel(priority: Priority) {
   return priority === "urgent" ? "Urgent" : priority === "reply" ? "Needs reply" : "Unread";
@@ -174,6 +175,8 @@ export default function TendingPrototype() {
   const [priorityDraft, setPriorityDraft] = useState("");
   const [prioritySuggestions, setPrioritySuggestions] = useState<PrioritySuggestion[]>([]);
   const [priorityBusy, setPriorityBusy] = useState(false);
+  const [watchWords, setWatchWords] = useState<Record<"gmail" | "x", WatchKeyword[]>>({ gmail: [], x: [] });
+  const [watchDrafts, setWatchDrafts] = useState<Record<"gmail" | "x", string>>({ gmail: "", x: "" });
 
   useEffect(() => {
     if (!tendingSupabase) {
@@ -211,6 +214,15 @@ export default function TendingPrototype() {
       if (!cancelled && response.ok) setPriorityPeople(payload.people ?? []);
     }).catch(() => { /* Settings remains usable if this optional preference cannot load. */ });
     return () => { cancelled = true; };
+  }, [authReady, user?.id]);
+
+  useEffect(() => {
+    if (!authReady || !user) { setWatchWords({ gmail: [], x: [] }); return; }
+    void Promise.all((["gmail", "x"] as const).map(async (source) => {
+      const response = await gmailFetch(`/api/tending/keywords?source=${source}`);
+      const payload = await response.json() as { keywords?: WatchKeyword[] };
+      return [source, payload.keywords ?? []] as const;
+    })).then((entries) => setWatchWords(Object.fromEntries(entries) as Record<"gmail" | "x", WatchKeyword[]>)).catch(() => { /* Optional settings remain available. */ });
   }, [authReady, user?.id]);
 
   useEffect(() => {
@@ -275,6 +287,7 @@ export default function TendingPrototype() {
             reason: thread.priority_person ? "priority person" : thread.urgency === "urgent" ? "time-sensitive" : thread.reply_worthy ? "contains a request" : "unread",
             reasons: [
               ...(thread.priority_person ? ["A person on your priority list sent this"] : []),
+              ...(thread.keyword_match ? ["Matches one of your Gmail watch words"] : []),
               ...(thread.reply_worthy ? ["Contains a question, request, or direct follow-up"] : []),
               ...(thread.urgency === "urgent" ? ["Language or timing suggests this is time-sensitive"] : []),
               ...(thread.unread ? ["Still unread in Gmail"] : []),
@@ -320,7 +333,7 @@ export default function TendingPrototype() {
           priority: event.reply_worthy ? "reply" : "watch",
           bucket: event.reply_worthy ? "needs_reply" : "unread",
           reason: event.reply_worthy ? "contains a request" : "worth a look",
-          reasons: ["Latest message is from this sender", ...(event.sender_followed ? ["You follow this account"] : []), ...(event.reply_worthy ? ["Contains a question or request"] : ["Not classified as likely promotion"])],
+          reasons: ["Latest message is from this sender", ...(event.sender_followed ? ["You follow this account"] : []), ...(event.keyword_match ? ["Matches one of your X watch words"] : []), ...(event.reply_worthy ? ["Contains a question or request"] : ["Not classified as likely promotion"])],
           detail: event.text,
           sourceUrl: event.source_url,
         }));
@@ -484,6 +497,28 @@ export default function TendingPrototype() {
     finally { setPriorityBusy(false); }
   }
 
+  async function addWatchWord(source: "gmail" | "x") {
+    const phrase = watchDrafts[source].trim();
+    if (!phrase) return;
+    try {
+      const response = await gmailFetch(`/api/tending/keywords?source=${source}&phrase=${encodeURIComponent(phrase)}`, { method: "POST" });
+      const payload = await response.json() as { keywords?: WatchKeyword[]; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Could not save this watch word.");
+      setWatchWords((current) => ({ ...current, [source]: payload.keywords ?? [] }));
+      setWatchDrafts((current) => ({ ...current, [source]: "" }));
+      setToast(`Watch word saved. Refresh ${source === "gmail" ? "Gmail" : "X DMs"} to apply it.`);
+    } catch (error) { setToast(error instanceof Error ? error.message : "Could not save this watch word."); }
+  }
+
+  async function removeWatchWord(source: "gmail" | "x", id: string) {
+    try {
+      const response = await gmailFetch(`/api/tending/keywords?source=${source}&id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const payload = await response.json() as { keywords?: WatchKeyword[]; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Could not remove this watch word.");
+      setWatchWords((current) => ({ ...current, [source]: payload.keywords ?? [] }));
+    } catch (error) { setToast(error instanceof Error ? error.message : "Could not remove this watch word."); }
+  }
+
   if (!user && !showPreview) {
     return <main className="landing-shell">
       <header className="landing-nav">
@@ -591,6 +626,7 @@ export default function TendingPrototype() {
         <div className="setting-row"><div><b>Desktop reminders</b><small>{notificationState === "enabled" ? "Enabled — your test reminder was sent." : notificationState === "blocked" ? "Permission wasn’t granted. You can enable it in your browser settings." : "Get a small desktop nudge when something needs you."}</small></div><button className={notificationState === "enabled" ? "setting-button on" : "setting-button"} onClick={enableNotifications}>{notificationState === "enabled" ? "Enabled" : "Try a reminder"}</button></div>
         <div className="setting-row"><div><b>Quiet hours</b><small>Hold ordinary reminders from 10 PM until 8 AM.</small></div><button className={quietHours ? "switch on" : "switch"} onClick={() => setQuietHours(!quietHours)} aria-label="Toggle quiet hours"><i /></button></div>
         <div className="setting-row priority-setting"><div><b>Priority people</b><small>Search a recent sender and choose their email. They receive a stronger Gmail signal; no messages are sent or changed.</small><div className="priority-editor"><input value={priorityDraft} onChange={(event) => setPriorityDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addPriorityPerson(); }} placeholder="Search a recent sender" aria-label="Search a recent Gmail sender" /><button className="text-action" onClick={() => void addPriorityPerson()} disabled={!priorityDraft.trim() || priorityBusy}>{priorityBusy ? "Saving…" : "Add"}</button></div>{prioritySuggestions.length > 0 && <div className="priority-suggestions" role="listbox">{prioritySuggestions.map((person) => <button key={person.identifier} role="option" onClick={() => void addPriorityPerson(person)}><b>{person.label}</b><small>{person.identifier}</small><span>+</span></button>)}</div>}{priorityPeople.length ? <div className="priority-chips" aria-label="Priority people">{priorityPeople.map((person) => <span key={person.id}>{person.label}<button onClick={() => void removePriorityPerson(person.id)} aria-label={`Remove ${person.label}`}>×</button></span>)}</div> : <p className="priority-empty">Add someone above, then refresh Gmail to apply it to your recent inbox.</p>}</div></div>
+        {(["gmail", "x"] as const).map((source) => <div key={source} className="setting-row priority-setting"><div><b>{source === "gmail" ? "Gmail watch words" : "X watch words"}</b><small>Words or short phrases that should make a human message more likely to surface.</small><div className="priority-editor"><input value={watchDrafts[source]} onChange={(event) => setWatchDrafts((current) => ({ ...current, [source]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter") void addWatchWord(source); }} placeholder={source === "gmail" ? "e.g. partnership, contract" : "e.g. project, collaboration"} aria-label={`Add a ${source} watch word`} /><button className="text-action" onClick={() => void addWatchWord(source)} disabled={!watchDrafts[source].trim()}>Add</button></div>{watchWords[source].length ? <div className="priority-chips">{watchWords[source].map((word) => <span key={word.id}>{word.phrase}<button onClick={() => void removeWatchWord(source, word.id)} aria-label={`Remove ${word.phrase}`}>×</button></span>)}</div> : <p className="priority-empty">No watch words yet.</p>}</div></div>)}
         <div className="connection-row"><span className="connection-icon gmail">M</span><div><b>Connected sources</b><small>{gmail?.connected ? `${gmail.email ?? "Gmail"} is connected` : "Choose Gmail, X DMs, or both."}</small></div><button onClick={() => { setSettingsOpen(false); setConnectionsOpen(true); }}>Manage</button></div>
       </section></div>}
 

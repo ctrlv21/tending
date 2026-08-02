@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import { gmailCallback, gmailStart, gmailStatus, gmailSync, gmailThreads } from "./tendings/server/gmail";
 import { xCallback, xEvents, xStart, xStatus, xSync } from "./tendings/server/x";
 import { priorities } from "./tendings/server/priorities";
+import { keywords } from "./tendings/server/keywords";
 
 function responseAdapter(response: import("node:http").ServerResponse) {
   const adapter = {
@@ -45,6 +46,10 @@ function localApi(): Plugin {
       server.middlewares.use("/api/tending/priorities", async (request, response) => {
         const query = Object.fromEntries(new URL(request.url ?? "/", "http://localhost").searchParams.entries());
         return priorities(Object.assign(request, { query }), responseAdapter(response));
+      });
+      server.middlewares.use("/api/tending/keywords", async (request, response) => {
+        const query = Object.fromEntries(new URL(request.url ?? "/", "http://localhost").searchParams.entries());
+        return keywords(Object.assign(request, { query }), responseAdapter(response));
       });
     },
   };
