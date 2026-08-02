@@ -142,7 +142,7 @@ type GmailStatus = { configured: boolean; connected: boolean; status: string; em
 type GmailThread = { gmail_thread_id: string; sender: string; subject: string; snippet: string; latest_message_at: string; unread: boolean; reply_worthy: boolean; source_url: string; importance_score: number; urgency: Priority; priority_person: boolean; keyword_match: boolean; analysis_reason?: string | null };
 type PriorityPerson = { id: string; identifier: string; label: string };
 type PrioritySuggestion = { identifier: string; label: string };
-type XStatus = { configured: boolean; connected: boolean; status: string; username: string | null; message?: string };
+type XStatus = { configured: boolean; connected: boolean; status: string; username: string | null; latestEventAt?: string | null; dataFreshness?: "current" | "delayed" | "no_messages" | "not_connected"; message?: string };
 type XEvent = { x_event_id: string; sender_name: string; text: string; created_at_x: string; reply_worthy: boolean; classification: "needs_reply" | "worth_a_look"; sender_followed: boolean; keyword_match: boolean; analysis_reason?: string | null; source_url: string };
 type WatchKeyword = { id: string; phrase: string; source: "gmail" | "x" };
 
@@ -256,17 +256,6 @@ export default function TendingPrototype() {
       setConnectionsOpen(true);
     }
   }, [user?.id]);
-
-  useEffect(() => {
-    if (!authReady || !user) return;
-    const key = `tending-auto-sync:${user.id}:${__TENDING_RELEASE__}`;
-    if (window.sessionStorage.getItem(key)) return;
-    window.sessionStorage.setItem(key, "started");
-    void Promise.all(["/api/tending/gmail/sync", "/api/tending/x/sync"].map(async (path) => {
-      const response = await gmailFetch(path, { method: "POST" });
-      return response.ok;
-    })).then((results) => { if (results.some(Boolean)) setRefreshEpoch((value) => value + 1); }).catch(() => { /* Manual Refresh all remains available. */ });
-  }, [authReady, user?.id]);
 
   useEffect(() => {
     if (!authReady) return;
@@ -680,8 +669,8 @@ export default function TendingPrototype() {
             <button className={gmail?.connected ? "connection-primary connected" : "connection-primary"} onClick={gmail?.connected ? syncGmailNow : connectGmail}>{gmail?.connected ? `Refresh ${gmail.emails?.length ?? 1} Gmail account${(gmail.emails?.length ?? 1) === 1 ? "" : "s"}` : user ? "Connect Gmail" : "Sign in to connect"}<span>↗</span></button>{gmail?.connected && <button className="connection-secondary" onClick={connectGmail}>Add another Gmail <span>↗</span></button>}
           </article>
           <article className="connection-card">
-            <div className="connection-card-top"><span className="connection-icon x">𝕏</span><span className={x?.connected ? "connection-state connected" : "connection-state"}>{x?.connected ? "Connected" : "Optional"}</span></div>
-            <h3>X direct messages</h3><p>Keep unread DMs and the conversations you still owe a reply in the same quiet place.</p>
+            <div className="connection-card-top"><span className="connection-icon x">𝕏</span><span className={x?.connected && x.dataFreshness !== "delayed" ? "connection-state connected" : "connection-state"}>{x?.dataFreshness === "delayed" ? "Feed delayed" : x?.connected ? "Connected" : "Optional"}</span></div>
+            <h3>X direct messages</h3><p>{x?.dataFreshness === "delayed" ? `X has not supplied a current inbox feed. Latest event available to Tending: ${x.latestEventAt ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(x.latestEventAt)) : "unknown"}. We are keeping it out of your action queue.` : "Keep unread DMs and the conversations you still owe a reply in the same quiet place."}</p>
             <ul><li>Read-only direct-message access</li><li>No posting or sending on your behalf</li><li>Uses your own X account</li></ul>
             <button className={x?.connected ? "connection-primary connected" : "connection-primary"} onClick={x?.connected ? syncXNow : connectX}>{x?.connected ? "Refresh X DMs" : user ? "Connect X DMs" : "Sign in to connect"}<span>↗</span></button>{x?.connected && <button className="connection-secondary" onClick={connectX}>Reconnect X <span>↗</span></button>}
           </article>
