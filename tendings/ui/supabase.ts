@@ -1,14 +1,24 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const url = import.meta.env.VITE_TENDING_SUPABASE_URL as string | undefined;
 const publishableKey = import.meta.env.VITE_TENDING_SUPABASE_PUBLISHABLE_KEY as string | undefined;
 
-export const tendingSupabase = url && publishableKey
-  ? createClient(url, publishableKey, {
+let client: SupabaseClient | null = null;
+
+if (url && publishableKey) {
+  try {
+    client = createClient(url, publishableKey, {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
         detectSessionInUrl: true,
       },
-    })
-  : null;
+    });
+  } catch {
+    // Keep the dashboard available when a deployment has placeholder configuration.
+    // The connection UI will explain that sign-in still needs to be configured.
+    client = null;
+  }
+}
+
+export const tendingSupabase = client;
