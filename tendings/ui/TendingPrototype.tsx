@@ -683,7 +683,7 @@ export default function TendingPrototype() {
             <div className="connection-card-top"><span className="connection-icon x">𝕏</span><span className={x?.connected ? "connection-state connected" : "connection-state"}>{x?.connected ? "Connected" : "Optional"}</span></div>
             <h3>X direct messages</h3><p>Keep unread DMs and the conversations you still owe a reply in the same quiet place.</p>
             <ul><li>Read-only direct-message access</li><li>No posting or sending on your behalf</li><li>Uses your own X account</li></ul>
-            <button className={x?.connected ? "connection-primary connected" : "connection-primary"} onClick={x?.connected ? syncXNow : connectX}>{x?.connected ? "Refresh X DMs" : user ? "Connect X DMs" : "Sign in to connect"}<span>↗</span></button>
+            <button className={x?.connected ? "connection-primary connected" : "connection-primary"} onClick={x?.connected ? syncXNow : connectX}>{x?.connected ? "Refresh X DMs" : user ? "Connect X DMs" : "Sign in to connect"}<span>↗</span></button>{x?.connected && <button className="connection-secondary" onClick={connectX}>Reconnect X <span>↗</span></button>}
           </article>
         </div>
         <p className="connections-footnote">You stay in control. Tending only uses the sources you explicitly connect.</p>
