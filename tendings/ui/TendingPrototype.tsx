@@ -180,6 +180,7 @@ export default function TendingPrototype() {
   const [watchWords, setWatchWords] = useState<Record<"gmail" | "x", WatchKeyword[]>>({ gmail: [], x: [] });
   const [watchDrafts, setWatchDrafts] = useState<Record<"gmail" | "x", string>>({ gmail: "", x: "" });
   const [refreshing, setRefreshing] = useState(false);
+  const [xTesting, setXTesting] = useState(false);
   const [refreshEpoch, setRefreshEpoch] = useState(0);
 
   useEffect(() => {
@@ -466,6 +467,15 @@ export default function TendingPrototype() {
     } catch { setToast("X could not refresh right now."); }
   }
 
+  async function testXFeed() {
+    setXTesting(true);
+    try {
+      const response = await gmailFetch("/api/tending/x/test", { method: "POST" });
+      const result = await response.json() as { ok: boolean; eventCount?: number; newestEventAt?: string | null; requestId?: string | null; error?: string };
+      setToast(result.ok ? `Official X test: ${result.eventCount ?? 0} events; newest ${result.newestEventAt ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(result.newestEventAt)) : "timestamp unavailable"}.${result.requestId ? ` Request ${result.requestId}.` : ""}` : result.error ?? "X API test could not run.");
+    } catch { setToast("X API test could not run right now."); } finally { setXTesting(false); }
+  }
+
   async function syncGmailNow() {
     try {
       const response = await gmailFetch("/api/tending/gmail/sync", { method: "POST" });
@@ -672,7 +682,7 @@ export default function TendingPrototype() {
             <div className="connection-card-top"><span className="connection-icon x">𝕏</span><span className={x?.connected && x.dataFreshness !== "delayed" ? "connection-state connected" : "connection-state"}>{x?.dataFreshness === "delayed" ? "Feed delayed" : x?.connected ? "Connected" : "Optional"}</span></div>
             <h3>X direct messages</h3><p>{x?.dataFreshness === "delayed" ? `X has not supplied a current inbox feed. Latest event available to Tending: ${x.latestEventAt ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(x.latestEventAt)) : "unknown"}. We are keeping it out of your action queue.` : "Keep unread DMs and the conversations you still owe a reply in the same quiet place."}</p>
             <ul><li>Read-only direct-message access</li><li>No posting or sending on your behalf</li><li>Uses your own X account</li></ul>
-            <button className={x?.connected ? "connection-primary connected" : "connection-primary"} onClick={x?.connected ? syncXNow : connectX}>{x?.connected ? "Refresh X DMs" : user ? "Connect X DMs" : "Sign in to connect"}<span>↗</span></button>{x?.connected && <button className="connection-secondary" onClick={connectX}>Reconnect X <span>↗</span></button>}
+            <button className={x?.connected ? "connection-primary connected" : "connection-primary"} onClick={x?.connected ? syncXNow : connectX}>{x?.connected ? "Refresh X DMs" : user ? "Connect X DMs" : "Sign in to connect"}<span>↗</span></button>{x?.connected && <><button className="connection-secondary" onClick={() => void testXFeed()} disabled={xTesting}>{xTesting ? "Testing X API…" : "Test X API feed"} <span>↗</span></button><button className="connection-secondary" onClick={connectX}>Reconnect X <span>↗</span></button></>}
           </article>
         </div>
         <p className="connections-footnote">You stay in control. Tending only uses the sources you explicitly connect.</p>
