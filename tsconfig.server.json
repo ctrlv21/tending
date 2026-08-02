@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "moduleResolution": "Bundler", "noEmit": true },
+  "include": ["api/**/*.ts", "server/**/*.ts", "tendings/server/**/*.ts", "tendings/api/**/*.ts", "vite.config.ts"]
+}
