@@ -66,7 +66,7 @@ function botScore(sender: XUser | undefined) {
   if (!sender.verified && followers < 8) score += 2;
   return score;
 }
-function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefined, isLatestInbound: boolean, matchesKeyword: boolean, analysis?: MessageAnalysis) {
+function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefined, isLatestInbound: boolean, matchesKeyword: boolean, priorityPerson: boolean, analysis?: MessageAnalysis) {
   const text = event.text ?? "";
   const directAsk = hasReplySignal(text);
   const risk = spamScore(text) + botScore(sender);
@@ -75,7 +75,7 @@ function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefi
   const credibleUnfollowedSender = Boolean(sender?.verified || (followers >= 50 && following <= Math.max(300, followers * 4)));
   const humanAsk = directAsk && risk < 2;
   const ageHours = Math.max(0, (Date.now() - new Date(event.created_at ?? Date.now()).getTime()) / 3_600_000);
-  let relevance = (senderFollowed ? 5 : 0) + (directAsk ? 3 : 0) + (matchesKeyword ? 3 : 0) + (credibleUnfollowedSender ? 1 : 0);
+  let relevance = (senderFollowed ? 5 : 0) + (priorityPerson ? 6 : 0) + (directAsk ? 3 : 0) + (matchesKeyword ? 3 : 0) + (credibleUnfollowedSender ? 1 : 0);
   if (sender?.verified) relevance += 1;
   if ((sender?.public_metrics?.followers_count ?? 0) > 100) relevance += 1;
   relevance -= risk;
@@ -83,7 +83,7 @@ function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefi
     ? "not_pending"
     : risk >= 2
       ? "filtered"
-      : humanAsk
+      : humanAsk || priorityPerson
         ? "needs_reply"
         : matchesKeyword
           ? "worth_a_look"
@@ -273,8 +273,9 @@ export async function syncX(ownerId: string, config: Config) {
     if (!paginationToken) break;
   }
   const follows = await followedIds(token, item.x_user_id);
-  const { data: keywordRows } = await db(config).from("tending_watch_keywords").select("normalized_phrase").eq("owner_id", ownerId).eq("source", "x");
+  const [{ data: keywordRows }, { data: priorityRows }] = await Promise.all([db(config).from("tending_watch_keywords").select("normalized_phrase").eq("owner_id", ownerId).eq("source", "x"), db(config).from("tending_priority_people").select("normalized_identifier").eq("owner_id", ownerId)]);
   const keywords = (keywordRows ?? []).map((row) => String(row.normalized_phrase));
+  const priorityPeople = new Set((priorityRows ?? []).map((row) => String(row.normalized_identifier)));
   const latestByConversation = new Map<string, XEvent>();
   for (const event of events) {
     const key = conversationKey(event, item.x_user_id);
@@ -294,7 +295,8 @@ export async function syncX(ownerId: string, config: Config) {
     const senderFollowed = Boolean(event.sender_id && follows.has(event.sender_id));
     const matchesKeyword = keywordMatch(event.text ?? "", keywords);
     const analysis = analyses.get(event.id);
-    const scored = classify(event, senderFollowed, sender, isLatestInbound, matchesKeyword, analysis);
+    const priorityPerson = priorityPeople.has((sender?.username ?? "").toLowerCase()) || priorityPeople.has((sender?.name ?? "").toLowerCase());
+    const scored = classify(event, senderFollowed, sender, isLatestInbound, matchesKeyword, priorityPerson, analysis);
     return { owner_id: ownerId, x_event_id: event.id, conversation_id: event.dm_conversation_id ?? null, sender_id: event.sender_id ?? null, sender_name: sender?.name || sender?.username || (inbound ? "X user" : "You"), text: event.text ?? "", created_at_x: event.created_at ?? now, inbound, reply_worthy: scored.classification === "needs_reply", classification: scored.classification, relevance_score: scored.relevance, spam_score: scored.risk, sender_followed: senderFollowed, keyword_match: matchesKeyword, analysis_reason: analysis?.reason ?? null, analysis_provider: analysis ? "anthropic" : null, analyzed_at: analysis ? now : null, source_url: event.dm_conversation_id ? `https://x.com/messages/${event.dm_conversation_id}` : "https://x.com/messages", updated_at: now };
   });
   // An empty response is not evidence that the inbox is empty. X has

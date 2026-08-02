@@ -160,3 +160,19 @@ create table if not exists public.tending_priority_people (
 create index if not exists tending_priority_people_owner_idx on public.tending_priority_people (owner_id);
 alter table public.tending_priority_people enable row level security;
 revoke all on table public.tending_priority_people from anon, authenticated;
+
+-- A user-owned action layer. Source APIs remain read-only; these states only
+-- describe how Tending should present an item and never mutate Gmail or X.
+create table if not exists public.tending_message_states (
+  owner_id uuid not null references auth.users(id) on delete cascade,
+  source text not null check (source in ('gmail', 'x')),
+  message_id text not null,
+  disposition text not null default 'open' check (disposition in ('open', 'handled', 'not_important', 'snoozed')),
+  snoozed_until timestamptz,
+  updated_at timestamptz not null default now(),
+  primary key (owner_id, source, message_id),
+  check ((disposition = 'snoozed') = (snoozed_until is not null))
+);
+create index if not exists tending_message_states_owner_idx on public.tending_message_states (owner_id, source, updated_at desc);
+alter table public.tending_message_states enable row level security;
+revoke all on table public.tending_message_states from anon, authenticated;

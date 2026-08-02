@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import "./tending.css";
 import { tendingSupabase } from "./supabase";
@@ -25,6 +25,7 @@ type Conversation = {
   deadline?: string;
   snoozeLabel?: string;
   sourceUrl?: string;
+  receivedAt?: string;
 };
 
 const INITIAL_CONVERSATIONS: Conversation[] = [
@@ -145,6 +146,15 @@ type PrioritySuggestion = { identifier: string; label: string };
 type XStatus = { configured: boolean; connected: boolean; status: string; username: string | null; latestEventAt?: string | null; dataFreshness?: "current" | "delayed" | "no_messages" | "not_connected"; message?: string };
 type XEvent = { x_event_id: string; sender_name: string; text: string; created_at_x: string; reply_worthy: boolean; classification: "needs_reply" | "worth_a_look"; sender_followed: boolean; keyword_match: boolean; analysis_reason?: string | null; source_url: string };
 type WatchKeyword = { id: string; phrase: string; source: "gmail" | "x" };
+type MessageState = { source: "gmail" | "x"; message_id: string; disposition: "open" | "handled" | "not_important" | "snoozed"; snoozed_until: string | null; updated_at: string };
+
+function stateKey(source: "gmail" | "x", messageId: string) { return `${source}:${messageId}`; }
+function applyMessageState(conversation: Conversation, state: MessageState | undefined) {
+  if (!state || state.disposition === "open") return conversation;
+  if (state.disposition === "snoozed" && state.snoozed_until && new Date(state.snoozed_until).getTime() > Date.now()) return { ...conversation, bucket: "waiting" as Bucket, snoozeLabel: new Intl.DateTimeFormat("en", { weekday: "short", hour: "numeric", minute: "2-digit" }).format(new Date(state.snoozed_until)), reason: "snoozed" };
+  if ((state.disposition === "handled" || state.disposition === "not_important") && (!conversation.receivedAt || new Date(state.updated_at).getTime() >= new Date(conversation.receivedAt).getTime())) return null;
+  return conversation;
+}
 
 function priorityLabel(priority: Priority) {
   return priority === "urgent" ? "Urgent" : priority === "reply" ? "Needs reply" : "Unread";
@@ -182,6 +192,9 @@ export default function TendingPrototype() {
   const [refreshing, setRefreshing] = useState(false);
   const [xTesting, setXTesting] = useState(false);
   const [refreshEpoch, setRefreshEpoch] = useState(0);
+  const [messageStates, setMessageStates] = useState<MessageState[]>([]);
+  const [xLimitationsOpen, setXLimitationsOpen] = useState(false);
+  const notificationBaseline = useRef<Set<string> | null>(null);
 
   useEffect(() => {
     if (!tendingSupabase) {
@@ -220,6 +233,27 @@ export default function TendingPrototype() {
     }).catch(() => { /* Settings remains usable if this optional preference cannot load. */ });
     return () => { cancelled = true; };
   }, [authReady, user?.id]);
+
+  useEffect(() => {
+    if (!authReady || !user) { setMessageStates([]); return; }
+    void gmailFetch("/api/tending/priorities?resource=message-state").then(async (response) => {
+      const payload = await response.json() as { states?: MessageState[] };
+      if (response.ok) setMessageStates(payload.states ?? []);
+    }).catch(() => { /* A source queue must remain readable even if preferences are unavailable. */ });
+  }, [authReady, user?.id, refreshEpoch]);
+
+  useEffect(() => {
+    if (!user) return;
+    const timer = window.setInterval(() => setRefreshEpoch((value) => value + 1), 120_000);
+    return () => window.clearInterval(timer);
+  }, [user?.id]);
+
+  useEffect(() => {
+    const xchat = new URLSearchParams(window.location.search).get("xchat");
+    if (!xchat) return;
+    setXLimitationsOpen(true);
+    window.history.replaceState({}, "", window.location.pathname);
+  }, [user?.id]);
 
   useEffect(() => {
     if (!authReady || !user) { setWatchWords({ gmail: [], x: [] }); return; }
@@ -280,7 +314,8 @@ export default function TendingPrototype() {
         const threadResponse = await gmailFetch("/api/tending/gmail/threads");
         const payload = await threadResponse.json() as { threads?: GmailThread[] };
         if (cancelled || !payload.threads) return;
-        const liveConversations: Conversation[] = payload.threads.map((thread) => {
+        const savedStates = new Map(messageStates.map((state) => [stateKey(state.source, state.message_id), state]));
+        const liveConversations = payload.threads.map((thread): Conversation => {
           const bucket: Bucket = thread.reply_worthy ? "needs_reply" : "unread";
           return {
             id: `gmail-${thread.gmail_thread_id}`,
@@ -303,8 +338,9 @@ export default function TendingPrototype() {
             ],
             detail: thread.snippet,
             sourceUrl: thread.source_url,
+            receivedAt: thread.latest_message_at,
           };
-        });
+        }).map((conversation) => applyMessageState(conversation, savedStates.get(stateKey("gmail", conversation.id.slice("gmail-".length))))).filter((conversation): conversation is Conversation => Boolean(conversation));
         setConversations((current) => [...current.filter((conversation) => conversation.source !== "Gmail"), ...liveConversations]);
         setSelectedId((current) => current || liveConversations[0]?.id || "");
       } catch {
@@ -313,7 +349,7 @@ export default function TendingPrototype() {
     }
     void loadGmail();
     return () => { cancelled = true; };
-  }, [authReady, user?.id, refreshEpoch]);
+  }, [authReady, user?.id, refreshEpoch, messageStates]);
 
   useEffect(() => {
     if (!authReady || !user) {
@@ -331,7 +367,8 @@ export default function TendingPrototype() {
         const eventResponse = await gmailFetch("/api/tending/x/events");
         const payload = await eventResponse.json() as { events?: XEvent[] };
         if (cancelled || !payload.events) return;
-        const xConversations: Conversation[] = payload.events.map((event) => ({
+        const savedStates = new Map(messageStates.map((state) => [stateKey(state.source, state.message_id), state]));
+        const xConversations = payload.events.map((event): Conversation => ({
           id: `x-${event.x_event_id}`,
           sender: event.sender_name,
           initials: event.sender_name.split(/\s+/).map((word) => word[0]).join("").slice(0, 2).toUpperCase() || "X",
@@ -345,13 +382,14 @@ export default function TendingPrototype() {
           reasons: ["Latest message is from this sender", ...(event.sender_followed ? ["You follow this account"] : []), ...(event.keyword_match ? ["Matches one of your X watch words"] : []), ...(event.analysis_reason ? [event.analysis_reason] : []), ...(event.reply_worthy ? ["Contains a question or request"] : ["Not classified as likely promotion"])],
           detail: event.text,
           sourceUrl: event.source_url,
-        }));
+          receivedAt: event.created_at_x,
+        })).map((conversation) => applyMessageState(conversation, savedStates.get(stateKey("x", conversation.id.slice("x-".length))))).filter((conversation): conversation is Conversation => Boolean(conversation));
         setConversations((current) => [...current.filter((conversation) => conversation.source !== "X DM"), ...xConversations]);
       } catch { if (!cancelled) setX({ configured: false, connected: false, status: "setup_required", username: null, message: "X setup is not complete." }); }
     }
     void loadX();
     return () => { cancelled = true; };
-  }, [authReady, user?.id, refreshEpoch]);
+  }, [authReady, user?.id, refreshEpoch, messageStates]);
 
   const counts = useMemo(() => {
     const count = (bucket: Bucket) => conversations.filter((conversation) => conversation.bucket === bucket).length;
@@ -373,16 +411,34 @@ export default function TendingPrototype() {
     window.setTimeout(() => setToast(null), 3400);
   }
 
+  async function saveMessageState(conversation: Conversation, disposition: MessageState["disposition"], snoozedUntil?: Date) {
+    const source = conversation.source === "Gmail" ? "gmail" : "x";
+    const messageId = conversation.id.slice(source === "gmail" ? "gmail-".length : "x-".length);
+    const query = new URLSearchParams({ resource: "message-state", source, messageId, disposition });
+    if (snoozedUntil) query.set("snoozedUntil", snoozedUntil.toISOString());
+    const response = await gmailFetch(`/api/tending/priorities?${query}`, { method: "POST" });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(payload.error ?? "Could not save this follow-through choice.");
+    setMessageStates((current) => [...current.filter((state) => stateKey(state.source, state.message_id) !== stateKey(source, messageId)), { source, message_id: messageId, disposition, snoozed_until: snoozedUntil?.toISOString() ?? null, updated_at: new Date().toISOString() }]);
+  }
+
   function markHandled() {
     if (!selected) return;
-    updateConversation(selected.id, { bucket: "handled", reason: "handled just now" }, "Marked handled. We’ll bring it back if a new message arrives.");
+    void saveMessageState(selected, "handled").then(() => updateConversation(selected.id, { bucket: "handled", reason: "handled just now" }, "Marked handled. We’ll bring it back if a newer message arrives.")).catch((error) => setToast(error instanceof Error ? error.message : "Could not save this change."));
     setActiveView("needs_reply");
   }
 
-  function snooze(label: string) {
+  function snooze(label: string, until: Date) {
     if (!selected) return;
-    updateConversation(selected.id, { bucket: "waiting", snoozeLabel: label, reason: `snoozed until ${label.toLowerCase()}` }, `Okay — we’ll bring this back ${label.toLowerCase()}.`);
+    void saveMessageState(selected, "snoozed", until).then(() => updateConversation(selected.id, { bucket: "waiting", snoozeLabel: label, reason: `snoozed until ${label.toLowerCase()}` }, `Okay — we’ll bring this back ${label.toLowerCase()}.`)).catch((error) => setToast(error instanceof Error ? error.message : "Could not save this snooze."));
     setActiveView("needs_reply");
+  }
+
+  function snoozeDate(kind: "later" | "tomorrow" | "monday") {
+    const now = new Date(); const date = new Date(now);
+    if (kind === "later") { if (now.getHours() >= 17) { date.setDate(date.getDate() + 1); date.setHours(9, 0, 0, 0); } else date.setHours(Math.max(now.getHours() + 3, 17), 0, 0, 0); return date; }
+    if (kind === "tomorrow") { date.setDate(date.getDate() + 1); date.setHours(9, 0, 0, 0); return date; }
+    date.setDate(date.getDate() + ((8 - date.getDay()) % 7 || 7)); date.setHours(10, 0, 0, 0); return date;
   }
 
   async function enableNotifications() {
@@ -393,14 +449,21 @@ export default function TendingPrototype() {
     const permission = await Notification.requestPermission();
     if (permission === "granted") {
       setNotificationState("enabled");
-      new Notification("Tending · Gmail", {
-        body: "Maya Chen asked about the revised contract. Waiting 26h · deadline Friday",
-      });
-      setToast("A sample reminder is on its way to your desktop.");
+      setToast("Desktop alerts are enabled while Tending is open.");
     } else {
       setNotificationState("blocked");
     }
   }
+
+  useEffect(() => {
+    const actionable = conversations.filter((conversation) => conversation.bucket === "needs_reply");
+    const current = new Set(actionable.map((conversation) => conversation.id));
+    if (!notificationBaseline.current) { notificationBaseline.current = current; return; }
+    const hour = new Date().getHours(); const quiet = quietHours && (hour >= 22 || hour < 8);
+    const newItems = actionable.filter((conversation) => !notificationBaseline.current?.has(conversation.id));
+    if (notificationState === "enabled" && !quiet) newItems.forEach((conversation) => new Notification(`Tending · ${conversation.sender}`, { body: `${conversation.source}: ${conversation.title}` }));
+    notificationBaseline.current = current;
+  }, [conversations, notificationState, quietHours]);
 
   async function signIn(source?: "gmail" | "x") {
     if (!tendingSupabase) {
@@ -644,8 +707,8 @@ export default function TendingPrototype() {
             {selected.bucket === "waiting" && <div className="detail-snoozed">Snoozed until <b>{selected.snoozeLabel}</b></div>}
             <div className="detail-actions">
               <button className="open-source" onClick={() => selected.sourceUrl ? window.open(selected.sourceUrl, "_blank", "noopener,noreferrer") : setToast(`In the live app, this opens the original ${selected.source} conversation.`)}>Open in {selected.source === "Gmail" ? "Gmail" : "X"} <span>↗</span></button>
-              {selected.bucket !== "handled" && <div className="action-pair"><button onClick={markHandled}>Mark handled</button><div className="snooze-wrap"><button onClick={() => setSnoozeMenu(!snoozeMenu)}>Snooze <span>⌄</span></button>{snoozeMenu && <div className="snooze-menu"><button onClick={() => snooze("later today")}>Later today</button><button onClick={() => snooze("tomorrow · 9 AM")}>Tomorrow morning</button><button onClick={() => snooze("Monday · 10 AM")}>Monday</button></div>}</div></div>}
-              <button className="not-important" onClick={() => updateConversation(selected.id, { bucket: "handled", reason: "not important" }, "Removed from your queue. You can always change this later.")}>Not important</button>
+              {selected.bucket !== "handled" && <div className="action-pair"><button onClick={markHandled}>Mark handled</button><div className="snooze-wrap"><button onClick={() => setSnoozeMenu(!snoozeMenu)}>Snooze <span>⌄</span></button>{snoozeMenu && <div className="snooze-menu"><button onClick={() => snooze("later today", snoozeDate("later"))}>Later today</button><button onClick={() => snooze("tomorrow · 9 AM", snoozeDate("tomorrow"))}>Tomorrow morning</button><button onClick={() => snooze("Monday · 10 AM", snoozeDate("monday"))}>Monday</button></div>}</div></div>}
+              <button className="not-important" onClick={() => void saveMessageState(selected, "not_important").then(() => updateConversation(selected.id, { bucket: "handled", reason: "not important" }, "Removed from your queue. A newer message will still return.")).catch((error) => setToast(error instanceof Error ? error.message : "Could not save this change."))}>Not important</button>
             </div>
           </> : <div className="detail-empty"><span>→</span><h2>Choose a conversation.</h2><p>Its context and your next move will stay right here.</p></div>}
         </aside>
@@ -656,12 +719,19 @@ export default function TendingPrototype() {
         <button onClick={() => setSettingsOpen(true)}>Settings</button>
       </nav>
 
+      {xLimitationsOpen && <div className="settings-backdrop x-limitations-backdrop" role="presentation" onMouseDown={() => setXLimitationsOpen(false)}><section className="x-limitations-sheet" role="dialog" aria-modal="true" aria-labelledby="x-limitations-title" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="close-settings" onClick={() => setXLimitationsOpen(false)} aria-label="Close X tracking details">×</button>
+        <p className="eyebrow">X, WITHOUT PRETENDING</p><h2 id="x-limitations-title">What Tending can actually hold.</h2>
+        <div className="x-limitations-list"><article><span>01</span><div><b>New encrypted chats, from now on</b><p>After X is connected, Tending receives live arrival and sent-message signals. It can bring a new conversation to your attention and clear it once X reports that you replied.</p></div></article><article><span>02</span><div><b>The message body stays in X</b><p>Encrypted XChat content is not available to third-party apps. Tending shows the sender and timing, then opens X for the original message.</p></div></article><article><span>03</span><div><b>Older DMs are a separate, imperfect feed</b><p>X’s legacy history endpoint can lag or omit chats. When that happens, Tending labels it as delayed and does not silently fill your queue with stale results.</p></div></article></div>
+        <p className="x-limitations-note">Tending never sends a DM, and it cannot reliably tell whether you merely opened one.</p><button className="x-limitations-confirm" onClick={() => setXLimitationsOpen(false)}>I understand <span>→</span></button>
+      </section></div>}
+
       {toast && <div className="tending-toast" role="status">{toast}<button onClick={() => setToast(null)}>×</button></div>}
 
       {settingsOpen && <div className="settings-backdrop" role="presentation" onMouseDown={() => setSettingsOpen(false)}><section className="settings-sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <button className="close-settings" onClick={() => setSettingsOpen(false)} aria-label="Close settings">×</button>
         <p className="eyebrow">YOUR BOUNDARIES</p><h2 id="settings-title">A little help, on your terms.</h2><p className="settings-intro">Tending only reminds you about conversations you connect. It never sends, archives, or changes anything.</p>
-        <div className="setting-row"><div><b>Desktop reminders</b><small>{notificationState === "enabled" ? "Enabled — your test reminder was sent." : notificationState === "blocked" ? "Permission wasn’t granted. You can enable it in your browser settings." : "Get a small desktop nudge when something needs you."}</small></div><button className={notificationState === "enabled" ? "setting-button on" : "setting-button"} onClick={enableNotifications}>{notificationState === "enabled" ? "Enabled" : "Try a reminder"}</button></div>
+        <div className="setting-row"><div><b>Desktop reminders</b><small>{notificationState === "enabled" ? "Enabled while Tending is open. Closed-browser push is not switched on yet." : notificationState === "blocked" ? "Permission wasn’t granted. You can enable it in your browser settings." : "Get a small desktop nudge for new items while this desk is open."}</small></div><button className={notificationState === "enabled" ? "setting-button on" : "setting-button"} onClick={enableNotifications}>{notificationState === "enabled" ? "Enabled" : "Enable alerts"}</button></div>
         <div className="setting-row"><div><b>Quiet hours</b><small>Hold ordinary reminders from 10 PM until 8 AM.</small></div><button className={quietHours ? "switch on" : "switch"} onClick={() => setQuietHours(!quietHours)} aria-label="Toggle quiet hours"><i /></button></div>
         <div className="setting-row priority-setting"><div><b>Priority people</b><small>Search Google Contacts and choose their email. They receive a stronger Gmail signal; no messages are sent or changed.</small><div className="priority-editor"><input value={priorityDraft} onChange={(event) => { setPriorityDraft(event.target.value); setPriorityLookupMessage(null); }} onKeyDown={(event) => { if (event.key === "Enter") void addPriorityPerson(); }} placeholder="Search a name or email" aria-label="Search Google Contacts" /><button className="text-action" onClick={() => void addPriorityPerson()} disabled={!priorityDraft.trim() || priorityBusy}>{priorityBusy ? "Saving…" : "Add"}</button></div>{prioritySuggestions.length > 0 && <div className="priority-suggestions" role="listbox">{prioritySuggestions.map((person) => <button key={person.identifier} role="option" onClick={() => void addPriorityPerson(person)}><b>{person.label}</b><small>{person.identifier}</small><span>+</span></button>)}</div>}{priorityLookupMessage && <p className="priority-empty priority-lookup-message">{priorityLookupMessage}</p>}{priorityPeople.length ? <div className="priority-chips" aria-label="Priority people">{priorityPeople.map((person) => <span key={person.id}>{person.label}<button onClick={() => void removePriorityPerson(person.id)} aria-label={`Remove ${person.label}`}>×</button></span>)}</div> : <p className="priority-empty">Add someone above, then refresh Gmail to apply it to your recent inbox.</p>}</div></div>
         {(["gmail", "x"] as const).map((source) => <div key={source} className="setting-row priority-setting"><div><b>{source === "gmail" ? "Gmail watch words" : "X watch words"}</b><small>Words or short phrases that should make a human message more likely to surface.</small><div className="priority-editor"><input value={watchDrafts[source]} onChange={(event) => setWatchDrafts((current) => ({ ...current, [source]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter") void addWatchWord(source); }} placeholder={source === "gmail" ? "e.g. partnership, contract" : "e.g. project, collaboration"} aria-label={`Add a ${source} watch word`} /><button className="text-action" onClick={() => void addWatchWord(source)} disabled={!watchDrafts[source].trim()}>Add</button></div>{watchWords[source].length ? <div className="priority-chips">{watchWords[source].map((word) => <span key={word.id}>{word.phrase}<button onClick={() => void removeWatchWord(source, word.id)} aria-label={`Remove ${word.phrase}`}>×</button></span>)}</div> : <p className="priority-empty">No watch words yet.</p>}</div></div>)}
@@ -681,9 +751,9 @@ export default function TendingPrototype() {
           </article>
           <article className="connection-card">
             <div className="connection-card-top"><span className="connection-icon x">𝕏</span><span className={x?.connected && x.dataFreshness !== "delayed" ? "connection-state connected" : "connection-state"}>{x?.dataFreshness === "delayed" ? "Feed delayed" : x?.connected ? "Connected" : "Optional"}</span></div>
-            <h3>X direct messages</h3><p>{x?.dataFreshness === "delayed" ? `X has not supplied a current inbox feed. Latest event available to Tending: ${x.latestEventAt ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(x.latestEventAt)) : "unknown"}. We are keeping it out of your action queue.` : "Keep unread DMs and the conversations you still owe a reply in the same quiet place."}</p>
+            <h3>X direct messages</h3><p>{x?.dataFreshness === "delayed" ? `X has not supplied a current legacy inbox feed. Latest event available: ${x.latestEventAt ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(x.latestEventAt)) : "unknown"}. We will not present it as current.` : "New encrypted X chats are tracked live after you connect; legacy DM history may be incomplete."}</p>
             <ul><li>Read-only direct-message access</li><li>No posting or sending on your behalf</li><li>Uses your own X account</li></ul>
-            <button className={x?.connected ? "connection-primary connected" : "connection-primary"} onClick={x?.connected ? syncXNow : connectX}>{x?.connected ? "Refresh X DMs" : user ? "Connect X DMs" : "Sign in to connect"}<span>↗</span></button>{x?.connected && <><button className="connection-secondary" onClick={() => void testXFeed()} disabled={xTesting}>{xTesting ? "Testing X API…" : "Test X API feed"} <span>↗</span></button><button className="connection-secondary" onClick={connectX}>Reconnect X <span>↗</span></button></>}
+            <button className={x?.connected ? "connection-primary connected" : "connection-primary"} onClick={x?.connected ? syncXNow : connectX}>{x?.connected ? "Check legacy X DMs" : user ? "Connect X DMs" : "Sign in to connect"}<span>↗</span></button>{x?.connected && <><button className="connection-secondary" onClick={() => setXLimitationsOpen(true)}>How X tracking works <span>↗</span></button><button className="connection-secondary" onClick={() => void testXFeed()} disabled={xTesting}>{xTesting ? "Testing X API…" : "Test X connection"} <span>↗</span></button><button className="connection-secondary" onClick={connectX}>Reconnect X <span>↗</span></button></>}
           </article>
         </div>
         <p className="connections-footnote">You stay in control. Tending only uses the sources you explicitly connect.</p>

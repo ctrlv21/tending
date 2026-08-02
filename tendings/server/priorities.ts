@@ -10,6 +10,25 @@ async function user(request: RequestLike) { const token = first(request.headers?
 export async function priorities(request: RequestLike, response: ResponseLike) {
   try {
     const { user: owner, client } = await user(request);
+    if (first(request.query?.resource) === "message-state") {
+      const source = String(first(request.query?.source) ?? "");
+      if (request.method === "GET") {
+        await client.from("tending_message_states").update({ disposition: "open", snoozed_until: null, updated_at: new Date().toISOString() }).eq("owner_id", owner.id).eq("disposition", "snoozed").lte("snoozed_until", new Date().toISOString());
+        const { data, error } = await client.from("tending_message_states").select("source, message_id, disposition, snoozed_until, updated_at").eq("owner_id", owner.id);
+        if (error) throw error;
+        return response.status(200).json({ states: data ?? [] });
+      }
+      if (request.method === "POST") {
+        const messageId = String(first(request.query?.messageId) ?? "").trim();
+        const disposition = String(first(request.query?.disposition) ?? "open");
+        const snoozedUntil = String(first(request.query?.snoozedUntil) ?? "").trim() || null;
+        if (!['gmail', 'x'].includes(source) || !messageId || !['open', 'handled', 'not_important', 'snoozed'].includes(disposition)) throw new Error("Invalid follow-through state.");
+        if ((disposition === "snoozed") !== Boolean(snoozedUntil)) throw new Error("A snooze needs a wake-up time.");
+        const { error } = await client.from("tending_message_states").upsert({ owner_id: owner.id, source, message_id: messageId, disposition, snoozed_until: snoozedUntil, updated_at: new Date().toISOString() }, { onConflict: "owner_id,source,message_id" });
+        if (error) throw error;
+      }
+      return response.status(200).json({ saved: true });
+    }
     const search = String(first(request.query?.search) ?? "").trim().slice(0, 80);
     if (request.method === "GET" && search.length >= 2) {
       let status = 200; let payload: unknown = { suggestions: [] };
