@@ -5,7 +5,7 @@ type RequestLike = { headers?: Record<string, string | string[] | undefined>; ur
 type ResponseLike = { status: (code: number) => ResponseLike; json: (payload: unknown) => unknown; redirect: (code: number, location: string) => unknown; setHeader: (name: string, value: string | string[]) => void };
 
 const STATE_TTL_MS = 10 * 60 * 1000;
-const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/contacts.readonly";
 
 type GmailConfig = { clientId: string; clientSecret: string; encryptionKey: string; supabaseUrl: string; serviceKey: string };
 type GmailConnectionRow = { id: string; owner_id: string; gmail_email: string | null; access_token_encrypted: string; refresh_token_encrypted: string | null; token_expires_at: string; history_id: string | null; status: string; last_synced_at: string | null };
@@ -127,6 +127,11 @@ export async function gmailSenders(request: RequestLike, response: ResponseLike)
     const config = getConfig(); const user = await getAuthenticatedUser(request, config); const connections = (await getConnections(user.id, config)).filter((item) => item.status === "connected"); const query = String(first(request.query?.query) ?? "").trim().replace(/[^\p{L}\p{N}@._\-\s]/gu, "").slice(0, 80);
     if (!connections.length) throw new Error("Connect Gmail to search recent senders.");
     if (query.length < 2) return response.status(200).json({ suggestions: [] });
+    const primaryToken = await refreshAccessToken(connections[0], config);
+    const peopleResponse = await fetch(`https://people.googleapis.com/v1/people:searchContacts?${new URLSearchParams({ query, readMask: "names,emailAddresses", pageSize: "10" })}`, { headers: { Authorization: `Bearer ${primaryToken}` } });
+    const peoplePayload = await peopleResponse.json() as { results?: Array<{ person?: { names?: Array<{ displayName?: string }>; emailAddresses?: Array<{ value?: string }> } }> };
+    const contactSuggestions = (peoplePayload.results ?? []).flatMap((result) => { const person = result.person; const label = person?.names?.[0]?.displayName?.trim(); return (person?.emailAddresses ?? []).flatMap((email) => email.value ? [{ identifier: email.value.toLowerCase(), label: label || email.value }] : []); });
+    if (contactSuggestions.length) return response.status(200).json({ suggestions: contactSuggestions.slice(0, 6) });
     const senderGroups = await Promise.all(connections.map(async (connection) => { const accessToken = await refreshAccessToken(connection, config); const listing = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?${new URLSearchParams({ q: `in:anywhere ${query}`, maxResults: "20" })}`, { headers: { Authorization: `Bearer ${accessToken}` } }); const payload = await listing.json() as { messages?: Array<{ id: string }>; error?: { message?: string } }; if (!listing.ok) throw new Error(payload.error?.message || "Gmail senders could not be searched."); return Promise.all((payload.messages ?? []).map(async (item) => { const itemResponse = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?format=metadata&metadataHeaders=From`, { headers: { Authorization: `Bearer ${accessToken}` } }); if (!itemResponse.ok) return null; const message = await itemResponse.json() as { payload?: { headers?: Array<{ name?: string; value?: string }> } }; const from = header(message.payload?.headers, "From"); const email = senderEmail(from); return email ? { identifier: email, label: senderName(from) } : null; })); }));
     const lowerQuery = query.toLowerCase(); const results = senderGroups.flat().filter((item): item is NonNullable<typeof item> => Boolean(item)); const directMatches = results.filter((item) => `${item.label} ${item.identifier}`.toLowerCase().includes(lowerQuery)); const seen = new Set<string>(); const suggestions = (directMatches.length ? directMatches : results).filter((item) => !seen.has(item.identifier) && Boolean(seen.add(item.identifier))).slice(0, 6);
     return response.status(200).json({ suggestions });
