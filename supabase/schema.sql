@@ -40,11 +40,15 @@ create table if not exists public.tending_gmail_threads (
   latest_message_at timestamptz not null,
   unread boolean not null default false,
   reply_worthy boolean not null default false,
+  importance_score integer not null default 0,
+  urgency text not null default 'watch' check (urgency in ('urgent', 'reply', 'watch')),
+  priority_person boolean not null default false,
   source_url text not null,
   updated_at timestamptz not null default now(),
   primary key (owner_id, gmail_thread_id)
 );
 create index if not exists tending_gmail_threads_queue_idx on public.tending_gmail_threads (owner_id, reply_worthy desc, unread desc, latest_message_at desc);
+create index if not exists tending_gmail_threads_importance_idx on public.tending_gmail_threads (owner_id, importance_score desc, latest_message_at desc);
 
 create table if not exists public.tending_x_oauth_states (
   state_hash text primary key,
@@ -105,3 +109,16 @@ revoke all on table public.tending_gmail_threads from anon, authenticated;
 revoke all on table public.tending_x_oauth_states from anon, authenticated;
 revoke all on table public.tending_x_connections from anon, authenticated;
 revoke all on table public.tending_x_events from anon, authenticated;
+
+create table if not exists public.tending_priority_people (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references auth.users(id) on delete cascade,
+  identifier text not null,
+  normalized_identifier text not null,
+  label text not null,
+  created_at timestamptz not null default now(),
+  unique (owner_id, normalized_identifier)
+);
+create index if not exists tending_priority_people_owner_idx on public.tending_priority_people (owner_id);
+alter table public.tending_priority_people enable row level security;
+revoke all on table public.tending_priority_people from anon, authenticated;

@@ -137,7 +137,8 @@ const VIEW_LABELS: Record<Bucket, string> = {
 };
 
 type GmailStatus = { configured: boolean; connected: boolean; status: string; email: string | null; lastSyncedAt: string | null; message?: string };
-type GmailThread = { gmail_thread_id: string; sender: string; subject: string; snippet: string; latest_message_at: string; unread: boolean; reply_worthy: boolean; source_url: string };
+type GmailThread = { gmail_thread_id: string; sender: string; subject: string; snippet: string; latest_message_at: string; unread: boolean; reply_worthy: boolean; source_url: string; importance_score: number; urgency: Priority; priority_person: boolean };
+type PriorityPerson = { id: string; identifier: string; label: string };
 type XStatus = { configured: boolean; connected: boolean; status: string; username: string | null; message?: string };
 type XEvent = { x_event_id: string; sender_name: string; text: string; created_at_x: string; reply_worthy: boolean; classification: "needs_reply" | "worth_a_look"; sender_followed: boolean; source_url: string };
 
@@ -168,6 +169,9 @@ export default function TendingPrototype() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
+  const [priorityPeople, setPriorityPeople] = useState<PriorityPerson[]>([]);
+  const [priorityDraft, setPriorityDraft] = useState("");
+  const [priorityBusy, setPriorityBusy] = useState(false);
 
   useEffect(() => {
     if (!tendingSupabase) {
@@ -193,6 +197,19 @@ export default function TendingPrototype() {
     headers.set("Authorization", `Bearer ${session.access_token}`);
     return fetch(path, { ...init, credentials: "same-origin", headers });
   }
+
+  useEffect(() => {
+    if (!authReady || !user) {
+      setPriorityPeople([]);
+      return;
+    }
+    let cancelled = false;
+    void gmailFetch("/api/tending/priorities").then(async (response) => {
+      const payload = await response.json() as { people?: PriorityPerson[] };
+      if (!cancelled && response.ok) setPriorityPeople(payload.people ?? []);
+    }).catch(() => { /* Settings remains usable if this optional preference cannot load. */ });
+    return () => { cancelled = true; };
+  }, [authReady, user?.id]);
 
   useEffect(() => {
     if (!authReady) return;
@@ -227,10 +244,15 @@ export default function TendingPrototype() {
             preview: thread.snippet,
             source: "Gmail",
             age: new Intl.RelativeTimeFormat("en", { numeric: "auto" }).format(Math.round((new Date(thread.latest_message_at).getTime() - Date.now()) / 3_600_000), "hour"),
-            priority: thread.reply_worthy ? "reply" : "watch",
+            priority: thread.urgency === "urgent" ? "urgent" : thread.reply_worthy ? "reply" : "watch",
             bucket,
-            reason: thread.reply_worthy ? "contains a request" : "unread",
-            reasons: thread.reply_worthy ? ["The latest message is from this sender", "Contains a question or request"] : ["New inbox message"],
+            reason: thread.priority_person ? "priority person" : thread.urgency === "urgent" ? "time-sensitive" : thread.reply_worthy ? "contains a request" : "unread",
+            reasons: [
+              ...(thread.priority_person ? ["A person on your priority list sent this"] : []),
+              ...(thread.reply_worthy ? ["Contains a question, request, or direct follow-up"] : []),
+              ...(thread.urgency === "urgent" ? ["Language or timing suggests this is time-sensitive"] : []),
+              ...(thread.unread ? ["Still unread in Gmail"] : []),
+            ],
             detail: thread.snippet,
             sourceUrl: thread.source_url,
           };
@@ -405,6 +427,34 @@ export default function TendingPrototype() {
     } catch { setToast("Gmail could not refresh right now."); }
   }
 
+  async function addPriorityPerson() {
+    const identifier = priorityDraft.trim();
+    if (!identifier || priorityBusy) return;
+    setPriorityBusy(true);
+    try {
+      const response = await gmailFetch(`/api/tending/priorities?identifier=${encodeURIComponent(identifier)}`, { method: "POST" });
+      const payload = await response.json() as { people?: PriorityPerson[]; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Could not save this person.");
+      setPriorityPeople(payload.people ?? []);
+      setPriorityDraft("");
+      setToast("Priority person saved. Refresh Gmail to re-rank your inbox.");
+    } catch (error) { setToast(error instanceof Error ? error.message : "Could not save this person."); }
+    finally { setPriorityBusy(false); }
+  }
+
+  async function removePriorityPerson(id: string) {
+    if (priorityBusy) return;
+    setPriorityBusy(true);
+    try {
+      const response = await gmailFetch(`/api/tending/priorities?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const payload = await response.json() as { people?: PriorityPerson[]; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Could not remove this person.");
+      setPriorityPeople(payload.people ?? []);
+      setToast("Priority person removed. Refresh Gmail to re-rank your inbox.");
+    } catch (error) { setToast(error instanceof Error ? error.message : "Could not remove this person."); }
+    finally { setPriorityBusy(false); }
+  }
+
   if (!user && !showPreview) {
     return <main className="landing-shell">
       <header className="landing-nav">
@@ -511,7 +561,7 @@ export default function TendingPrototype() {
         <p className="eyebrow">YOUR BOUNDARIES</p><h2 id="settings-title">A little help, on your terms.</h2><p className="settings-intro">Tending only reminds you about conversations you connect. It never sends, archives, or changes anything.</p>
         <div className="setting-row"><div><b>Desktop reminders</b><small>{notificationState === "enabled" ? "Enabled — your test reminder was sent." : notificationState === "blocked" ? "Permission wasn’t granted. You can enable it in your browser settings." : "Get a small desktop nudge when something needs you."}</small></div><button className={notificationState === "enabled" ? "setting-button on" : "setting-button"} onClick={enableNotifications}>{notificationState === "enabled" ? "Enabled" : "Try a reminder"}</button></div>
         <div className="setting-row"><div><b>Quiet hours</b><small>Hold ordinary reminders from 10 PM until 8 AM.</small></div><button className={quietHours ? "switch on" : "switch"} onClick={() => setQuietHours(!quietHours)} aria-label="Toggle quiet hours"><i /></button></div>
-        <div className="setting-row"><div><b>Priority people</b><small>Maya Chen, Alexis Park, northstar.vc</small></div><button className="text-action" onClick={() => setToast("Priority people editing is the next prototype interaction.")}>Edit</button></div>
+        <div className="setting-row priority-setting"><div><b>Priority people</b><small>Names or email addresses you never want Tending to miss. They receive a stronger Gmail signal; no messages are sent or changed.</small><div className="priority-editor"><input value={priorityDraft} onChange={(event) => setPriorityDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addPriorityPerson(); }} placeholder="Maya Chen or maya@company.com" aria-label="Add a priority person" /><button className="text-action" onClick={() => void addPriorityPerson()} disabled={!priorityDraft.trim() || priorityBusy}>{priorityBusy ? "Saving…" : "Add"}</button></div>{priorityPeople.length ? <div className="priority-chips" aria-label="Priority people">{priorityPeople.map((person) => <span key={person.id}>{person.label}<button onClick={() => void removePriorityPerson(person.id)} aria-label={`Remove ${person.label}`}>×</button></span>)}</div> : <p className="priority-empty">Add someone above, then refresh Gmail to apply it to your recent inbox.</p>}</div></div>
         <div className="connection-row"><span className="connection-icon gmail">M</span><div><b>Connected sources</b><small>{gmail?.connected ? `${gmail.email ?? "Gmail"} is connected` : "Choose Gmail, X DMs, or both."}</small></div><button onClick={() => { setSettingsOpen(false); setConnectionsOpen(true); }}>Manage</button></div>
       </section></div>}
 
