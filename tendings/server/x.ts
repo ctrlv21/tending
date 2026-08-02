@@ -59,14 +59,13 @@ function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefi
   const text = event.text ?? "";
   const directAsk = hasReplySignal(text);
   const risk = spamScore(text) + botScore(sender);
-  const credibleUnfollowedSender = Boolean(sender?.verified || (sender?.public_metrics?.followers_count ?? 0) >= 40);
-  let relevance = (senderFollowed ? 5 : 0) + (directAsk ? 3 : 0) + (matchesKeyword ? 3 : 0) + (credibleUnfollowedSender ? 1 : 0);
+  let relevance = (senderFollowed ? 5 : 0) + (directAsk ? 3 : 0) + (matchesKeyword ? 3 : 0);
   if (sender?.verified) relevance += 1;
   if ((sender?.public_metrics?.followers_count ?? 0) > 100) relevance += 1;
   relevance -= risk;
   const classification: Classification = !isLatestInbound
     ? "not_pending"
-    : risk >= 3 || (!senderFollowed && !credibleUnfollowedSender)
+    : risk >= 3 || !senderFollowed
       ? "filtered"
       : senderFollowed && (directAsk || matchesKeyword)
         ? "needs_reply"
