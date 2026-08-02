@@ -172,7 +172,12 @@ export async function syncX(ownerId: string, config: Config) {
     if (error) throw error;
   }
   await db(config).from("tending_x_connections").update({ last_synced_at: now, updated_at: now }).eq("owner_id", ownerId);
-  return rows.filter((row) => row.classification !== "not_pending").length;
+  const newestInbound = rows.filter((row) => row.inbound).sort((a, b) => new Date(b.created_at_x).getTime() - new Date(a.created_at_x).getTime())[0]?.created_at_x ?? null;
+  return {
+    count: rows.filter((row) => row.classification !== "not_pending").length,
+    latestEventAt: newestInbound,
+    dataFreshness: !newestInbound ? "no_messages" : Date.now() - new Date(newestInbound).getTime() > 36 * 3_600_000 ? "delayed" : "current",
+  };
 }
-export async function xSync(request: RequestLike, response: ResponseLike) { try { const config = getConfig(); const user = await currentUser(request, config); return response.status(200).json({ synced: true, count: await syncX(user.id, config) }); } catch (error) { return response.status(400).json({ synced: false, error: error instanceof Error ? error.message : "X could not refresh." }); } }
+export async function xSync(request: RequestLike, response: ResponseLike) { try { const config = getConfig(); const user = await currentUser(request, config); const result = await syncX(user.id, config); return response.status(200).json({ synced: true, ...result }); } catch (error) { return response.status(400).json({ synced: false, error: error instanceof Error ? error.message : "X could not refresh." }); } }
 export async function xEvents(request: RequestLike, response: ResponseLike) { try { const config = getConfig(); const user = await currentUser(request, config); const { data, error } = await db(config).from("tending_x_events").select("x_event_id, sender_name, text, created_at_x, reply_worthy, classification, sender_followed, keyword_match, analysis_reason, source_url").eq("owner_id", user.id).eq("inbound", true).in("classification", ["needs_reply", "worth_a_look"]).order("relevance_score", { ascending: false }).order("created_at_x", { ascending: false }).limit(100); if (error) throw error; return response.status(200).json({ events: data ?? [] }); } catch (error) { return response.status(400).json({ events: [], error: error instanceof Error ? error.message : "X messages could not be loaded." }); } }

@@ -460,8 +460,8 @@ export default function TendingPrototype() {
   async function syncXNow() {
     try {
       const response = await gmailFetch("/api/tending/x/sync", { method: "POST" });
-      const result = await response.json() as { synced: boolean; count?: number; error?: string };
-      setToast(result.synced ? `X refreshed — ${result.count ?? 0} direct messages checked.` : result.error ?? "X could not refresh.");
+      const result = await response.json() as { synced: boolean; count?: number; dataFreshness?: "current" | "delayed" | "no_messages"; latestEventAt?: string | null; error?: string };
+      setToast(result.synced ? result.dataFreshness === "delayed" ? `X responded, but its newest DM is ${result.latestEventAt ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(new Date(result.latestEventAt)) : "unknown"}. This is a delayed feed, not a successful current refresh.` : result.dataFreshness === "no_messages" ? "X responded with no DM events. Your previous queue was kept." : `X refreshed — ${result.count ?? 0} direct messages checked.` : result.error ?? "X could not refresh.");
       if (result.synced) setRefreshEpoch((value) => value + 1);
     } catch { setToast("X could not refresh right now."); }
   }
