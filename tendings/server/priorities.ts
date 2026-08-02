@@ -33,7 +33,9 @@ export async function priorities(request: RequestLike, response: ResponseLike) {
     if (request.method === "GET" && search.length >= 2) {
       let status = 200; let payload: unknown = { suggestions: [] };
       const relay = { status(code: number) { status = code; return relay; }, json(value: unknown) { payload = value; }, redirect() { return undefined; }, setHeader() { return undefined; } };
-      await gmailSenders({ ...request, query: { ...request.query, query: search } }, relay);
+      // Node/Vercel request headers are not enumerable, so spreading the request
+      // drops Authorization and made an authenticated contact lookup look signed out.
+      await gmailSenders({ headers: request.headers, method: request.method, query: { ...request.query, query: search } }, relay);
       return response.status(status).json(payload);
     }
     if (request.method === "POST") {
