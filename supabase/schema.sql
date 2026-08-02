@@ -35,6 +35,7 @@ create table if not exists public.tending_gmail_threads (
   owner_id uuid not null references auth.users(id) on delete cascade,
   gmail_thread_id text not null,
   sender text not null,
+  sender_email text,
   subject text not null,
   snippet text not null default '',
   latest_message_at timestamptz not null,
@@ -43,12 +44,14 @@ create table if not exists public.tending_gmail_threads (
   importance_score integer not null default 0,
   urgency text not null default 'watch' check (urgency in ('urgent', 'reply', 'watch')),
   priority_person boolean not null default false,
+  suppressed boolean not null default false,
   source_url text not null,
   updated_at timestamptz not null default now(),
   primary key (owner_id, gmail_thread_id)
 );
 create index if not exists tending_gmail_threads_queue_idx on public.tending_gmail_threads (owner_id, reply_worthy desc, unread desc, latest_message_at desc);
 create index if not exists tending_gmail_threads_importance_idx on public.tending_gmail_threads (owner_id, importance_score desc, latest_message_at desc);
+create index if not exists tending_gmail_threads_owner_visible_idx on public.tending_gmail_threads (owner_id, suppressed, unread, importance_score desc, latest_message_at desc);
 
 create table if not exists public.tending_x_oauth_states (
   state_hash text primary key,

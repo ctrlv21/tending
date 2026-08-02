@@ -139,6 +139,7 @@ const VIEW_LABELS: Record<Bucket, string> = {
 type GmailStatus = { configured: boolean; connected: boolean; status: string; email: string | null; lastSyncedAt: string | null; message?: string };
 type GmailThread = { gmail_thread_id: string; sender: string; subject: string; snippet: string; latest_message_at: string; unread: boolean; reply_worthy: boolean; source_url: string; importance_score: number; urgency: Priority; priority_person: boolean };
 type PriorityPerson = { id: string; identifier: string; label: string };
+type PrioritySuggestion = { identifier: string; label: string };
 type XStatus = { configured: boolean; connected: boolean; status: string; username: string | null; message?: string };
 type XEvent = { x_event_id: string; sender_name: string; text: string; created_at_x: string; reply_worthy: boolean; classification: "needs_reply" | "worth_a_look"; sender_followed: boolean; source_url: string };
 
@@ -171,6 +172,7 @@ export default function TendingPrototype() {
   const [showPreview, setShowPreview] = useState(false);
   const [priorityPeople, setPriorityPeople] = useState<PriorityPerson[]>([]);
   const [priorityDraft, setPriorityDraft] = useState("");
+  const [prioritySuggestions, setPrioritySuggestions] = useState<PrioritySuggestion[]>([]);
   const [priorityBusy, setPriorityBusy] = useState(false);
 
   useEffect(() => {
@@ -210,6 +212,30 @@ export default function TendingPrototype() {
     }).catch(() => { /* Settings remains usable if this optional preference cannot load. */ });
     return () => { cancelled = true; };
   }, [authReady, user?.id]);
+
+  useEffect(() => {
+    if (!user || priorityDraft.trim().length < 2) {
+      setPrioritySuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      void gmailFetch(`/api/tending/priorities?search=${encodeURIComponent(priorityDraft.trim())}`).then(async (response) => {
+        const payload = await response.json() as { suggestions?: PrioritySuggestion[] };
+        if (!cancelled && response.ok) setPrioritySuggestions(payload.suggestions ?? []);
+      }).catch(() => { if (!cancelled) setPrioritySuggestions([]); });
+    }, 180);
+    return () => { cancelled = true; window.clearTimeout(timeout); };
+  }, [priorityDraft, user?.id]);
+
+  useEffect(() => {
+    if (!user) return;
+    const source = window.sessionStorage.getItem("tending-connect-source");
+    if (source === "gmail" || source === "x") {
+      window.sessionStorage.removeItem("tending-connect-source");
+      setConnectionsOpen(true);
+    }
+  }, [user?.id]);
 
   useEffect(() => {
     if (!authReady) return;
@@ -354,11 +380,12 @@ export default function TendingPrototype() {
     }
   }
 
-  async function signIn() {
+  async function signIn(source?: "gmail" | "x") {
     if (!tendingSupabase) {
       setToast("Add Tending’s public Supabase URL and publishable key to enable sign-in.");
       return;
     }
+    if (source) window.sessionStorage.setItem("tending-connect-source", source);
     const { error } = await tendingSupabase.auth.signInWithOAuth({
       provider: "google",
       options: { redirectTo: window.location.origin },
@@ -427,16 +454,18 @@ export default function TendingPrototype() {
     } catch { setToast("Gmail could not refresh right now."); }
   }
 
-  async function addPriorityPerson() {
-    const identifier = priorityDraft.trim();
+  async function addPriorityPerson(candidate?: PrioritySuggestion) {
+    const identifier = candidate?.identifier ?? priorityDraft.trim();
     if (!identifier || priorityBusy) return;
     setPriorityBusy(true);
     try {
-      const response = await gmailFetch(`/api/tending/priorities?identifier=${encodeURIComponent(identifier)}`, { method: "POST" });
+      const label = candidate?.label ?? identifier;
+      const response = await gmailFetch(`/api/tending/priorities?identifier=${encodeURIComponent(identifier)}&label=${encodeURIComponent(label)}`, { method: "POST" });
       const payload = await response.json() as { people?: PriorityPerson[]; error?: string };
       if (!response.ok) throw new Error(payload.error ?? "Could not save this person.");
       setPriorityPeople(payload.people ?? []);
       setPriorityDraft("");
+      setPrioritySuggestions([]);
       setToast("Priority person saved. Refresh Gmail to re-rank your inbox.");
     } catch (error) { setToast(error instanceof Error ? error.message : "Could not save this person."); }
     finally { setPriorityBusy(false); }
@@ -459,15 +488,15 @@ export default function TendingPrototype() {
     return <main className="landing-shell">
       <header className="landing-nav">
         <a className="tending-wordmark" href="/" aria-label="Tending home">tending<span>·</span></a>
-        <div className="landing-nav-right"><span>Private by default</span><button onClick={signIn}>Sign in <b>↗</b></button></div>
+        <div className="landing-nav-right"><span>Private by default</span><button onClick={() => signIn()}>Sign in <b>↗</b></button></div>
       </header>
       <section className="landing-hero">
         <div className="landing-copy">
           <p className="landing-kicker"><i /> A quieter way to keep up</p>
           <h1>A few things <em>need you.</em></h1>
           <p className="landing-intro">Tending watches the messages that would otherwise slip through, then leaves you with one small, considered queue.</p>
-          <div className="landing-actions"><button className="landing-primary" onClick={signIn}>Start tending <span>↗</span></button><button className="landing-secondary" onClick={() => setShowPreview(true)}>See the desk <span>↓</span></button></div>
-          <p className="landing-note">Gmail and X DMs · read-only · no sending on your behalf</p>
+          <div className="landing-connect"><p>Choose what to connect first</p><div><button className="landing-primary" onClick={() => signIn("gmail")}>Connect Gmail <span>↗</span></button><button className="landing-source" onClick={() => signIn("x")}>Connect X DMs <span>↗</span></button></div></div>
+          <button className="landing-secondary" onClick={() => setShowPreview(true)}>See the desk <span>↓</span></button><p className="landing-note">Connect either, or both · read-only · no sending on your behalf</p>
         </div>
         <div className="landing-window" aria-label="A preview of the Tending queue">
           <div className="glass-topline"><span><i /> Today, quietly</span><span>03 waiting</span></div>
@@ -489,7 +518,7 @@ export default function TendingPrototype() {
       <header className="tending-topbar">
         <a className="tending-wordmark" href="/" aria-label="Tending home">tending<span>·</span></a>
         <div className="tending-date">Tuesday, July 28</div>
-        <div className="tending-status"><i /> {user ? (gmail?.connected ? "Gmail connected" : user.email ?? "Signed in") : "Private by default"} <button onClick={() => setSettingsOpen(true)} aria-label="Open settings">Settings</button><button onClick={user ? signOut : signIn}>{user ? "Sign out" : "Sign in"}</button></div>
+        <div className="tending-status"><i /> {user ? `${[gmail?.connected ? "Gmail" : null, x?.connected ? "X" : null].filter(Boolean).join(" + ") || user.email || "Signed in"}${gmail?.connected || x?.connected ? " connected" : ""}` : "Private by default"} <button onClick={() => setSettingsOpen(true)} aria-label="Open settings">Settings</button><button onClick={user ? signOut : () => signIn()}>{user ? "Sign out" : "Sign in"}</button></div>
       </header>
 
       <div className="tending-layout">
@@ -561,7 +590,7 @@ export default function TendingPrototype() {
         <p className="eyebrow">YOUR BOUNDARIES</p><h2 id="settings-title">A little help, on your terms.</h2><p className="settings-intro">Tending only reminds you about conversations you connect. It never sends, archives, or changes anything.</p>
         <div className="setting-row"><div><b>Desktop reminders</b><small>{notificationState === "enabled" ? "Enabled — your test reminder was sent." : notificationState === "blocked" ? "Permission wasn’t granted. You can enable it in your browser settings." : "Get a small desktop nudge when something needs you."}</small></div><button className={notificationState === "enabled" ? "setting-button on" : "setting-button"} onClick={enableNotifications}>{notificationState === "enabled" ? "Enabled" : "Try a reminder"}</button></div>
         <div className="setting-row"><div><b>Quiet hours</b><small>Hold ordinary reminders from 10 PM until 8 AM.</small></div><button className={quietHours ? "switch on" : "switch"} onClick={() => setQuietHours(!quietHours)} aria-label="Toggle quiet hours"><i /></button></div>
-        <div className="setting-row priority-setting"><div><b>Priority people</b><small>Names or email addresses you never want Tending to miss. They receive a stronger Gmail signal; no messages are sent or changed.</small><div className="priority-editor"><input value={priorityDraft} onChange={(event) => setPriorityDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addPriorityPerson(); }} placeholder="Maya Chen or maya@company.com" aria-label="Add a priority person" /><button className="text-action" onClick={() => void addPriorityPerson()} disabled={!priorityDraft.trim() || priorityBusy}>{priorityBusy ? "Saving…" : "Add"}</button></div>{priorityPeople.length ? <div className="priority-chips" aria-label="Priority people">{priorityPeople.map((person) => <span key={person.id}>{person.label}<button onClick={() => void removePriorityPerson(person.id)} aria-label={`Remove ${person.label}`}>×</button></span>)}</div> : <p className="priority-empty">Add someone above, then refresh Gmail to apply it to your recent inbox.</p>}</div></div>
+        <div className="setting-row priority-setting"><div><b>Priority people</b><small>Search a recent sender and choose their email. They receive a stronger Gmail signal; no messages are sent or changed.</small><div className="priority-editor"><input value={priorityDraft} onChange={(event) => setPriorityDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addPriorityPerson(); }} placeholder="Search a recent sender" aria-label="Search a recent Gmail sender" /><button className="text-action" onClick={() => void addPriorityPerson()} disabled={!priorityDraft.trim() || priorityBusy}>{priorityBusy ? "Saving…" : "Add"}</button></div>{prioritySuggestions.length > 0 && <div className="priority-suggestions" role="listbox">{prioritySuggestions.map((person) => <button key={person.identifier} role="option" onClick={() => void addPriorityPerson(person)}><b>{person.label}</b><small>{person.identifier}</small><span>+</span></button>)}</div>}{priorityPeople.length ? <div className="priority-chips" aria-label="Priority people">{priorityPeople.map((person) => <span key={person.id}>{person.label}<button onClick={() => void removePriorityPerson(person.id)} aria-label={`Remove ${person.label}`}>×</button></span>)}</div> : <p className="priority-empty">Add someone above, then refresh Gmail to apply it to your recent inbox.</p>}</div></div>
         <div className="connection-row"><span className="connection-icon gmail">M</span><div><b>Connected sources</b><small>{gmail?.connected ? `${gmail.email ?? "Gmail"} is connected` : "Choose Gmail, X DMs, or both."}</small></div><button onClick={() => { setSettingsOpen(false); setConnectionsOpen(true); }}>Manage</button></div>
       </section></div>}
 
