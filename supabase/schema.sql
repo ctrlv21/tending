@@ -19,7 +19,8 @@ create table if not exists public.tending_gmail_oauth_states (
 create index if not exists tending_gmail_oauth_states_expiry_idx on public.tending_gmail_oauth_states (expires_at);
 
 create table if not exists public.tending_gmail_connections (
-  owner_id uuid primary key references auth.users(id) on delete cascade,
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references auth.users(id) on delete cascade,
   gmail_email text,
   access_token_encrypted text not null,
   refresh_token_encrypted text,
@@ -28,11 +29,13 @@ create table if not exists public.tending_gmail_connections (
   status text not null default 'connected' check (status in ('connected', 'needs_reconnect', 'disconnected')),
   connected_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  last_synced_at timestamptz
+  last_synced_at timestamptz,
+  unique (owner_id, gmail_email)
 );
 
 create table if not exists public.tending_gmail_threads (
   owner_id uuid not null references auth.users(id) on delete cascade,
+  gmail_connection_id uuid not null references public.tending_gmail_connections(id) on delete cascade,
   gmail_thread_id text not null,
   sender text not null,
   sender_email text,
@@ -48,7 +51,7 @@ create table if not exists public.tending_gmail_threads (
   suppressed boolean not null default false,
   source_url text not null,
   updated_at timestamptz not null default now(),
-  primary key (owner_id, gmail_thread_id)
+  primary key (owner_id, gmail_connection_id, gmail_thread_id)
 );
 create index if not exists tending_gmail_threads_queue_idx on public.tending_gmail_threads (owner_id, reply_worthy desc, unread desc, latest_message_at desc);
 create index if not exists tending_gmail_threads_importance_idx on public.tending_gmail_threads (owner_id, importance_score desc, latest_message_at desc);
