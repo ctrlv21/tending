@@ -30,12 +30,13 @@ function callbackUrl(request: RequestLike) { return `${appUrl(request)}/api/tend
 async function currentUser(request: RequestLike, config: Config) { const token = first(request.headers?.authorization)?.match(/^Bearer\s+(.+)$/i)?.[1]; if (!token) throw new Error("Sign in is required before connecting X."); const { data: { user }, error } = await db(config).auth.getUser(token); if (error || !user) throw new Error("Your session has expired. Please sign in again."); await db(config).from("tending_profiles").upsert({ id: user.id, email: user.email ?? null, display_name: typeof user.user_metadata?.full_name === "string" ? user.user_metadata.full_name : null, updated_at: new Date().toISOString() }, { onConflict: "id" }); return user; }
 async function connection(ownerId: string, config: Config) { const { data, error } = await db(config).from("tending_x_connections").select("*").eq("owner_id", ownerId).maybeSingle(); if (error) throw error; return data as Connection | null; }
 async function accessToken(item: Connection, config: Config) { if (new Date(item.token_expires_at).getTime() > Date.now() + 60_000) return decrypt(item.access_token_encrypted, config.encryptionKey); if (!item.refresh_token_encrypted) throw new Error("X needs to be reconnected."); const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: decrypt(item.refresh_token_encrypted, config.encryptionKey), client_id: config.clientId }); const response = await fetch("https://api.x.com/2/oauth2/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: `Basic ${Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64")}` }, body }); const token = await response.json() as { access_token?: string; refresh_token?: string; expires_in?: number; error?: string }; if (!response.ok || !token.access_token) throw new Error(token.error || "X token refresh failed."); await db(config).from("tending_x_connections").update({ access_token_encrypted: encrypt(token.access_token, config.encryptionKey), refresh_token_encrypted: token.refresh_token ? encrypt(token.refresh_token, config.encryptionKey) : item.refresh_token_encrypted, token_expires_at: new Date(Date.now() + (token.expires_in ?? 7200) * 1000).toISOString(), updated_at: new Date().toISOString() }).eq("owner_id", item.owner_id); return token.access_token; }
-type XEvent = { id: string; sender_id?: string; text?: string; created_at?: string; dm_conversation_id?: string };
+type XEvent = { id: string; sender_id?: string; text?: string; created_at?: string; dm_conversation_id?: string; participant_ids?: string[] };
 type XUser = { id: string; name?: string; username?: string; verified?: boolean; description?: string; public_metrics?: { followers_count?: number; following_count?: number } };
 type Classification = "needs_reply" | "worth_a_look" | "filtered" | "not_pending";
 
 function hasReplySignal(text: string) { return /\?|\b(can you|could you|would you|please|let me know|thoughts\?|confirm|urgent|asap|deadline|today|tomorrow|time-sensitive|important|need your|action required)\b/i.test(text); }
 function keywordMatch(text: string, words: string[]) { const lower = text.toLowerCase(); return words.some((word) => lower.includes(word)); }
+function conversationKey(event: XEvent) { return event.dm_conversation_id || (event.participant_ids?.length ? [...event.participant_ids].sort().join("-") : event.id); }
 function spamScore(text: string) {
   const links = text.match(/https?:\/\/\S+/gi)?.length ?? 0;
   let score = links > 1 ? 3 : links === 1 ? 1 : 0;
@@ -104,7 +105,7 @@ export async function syncX(ownerId: string, config: Config) {
   const token = await accessToken(item, config);
   const events: XEvent[] = []; const users = new Map<string, XUser>(); let paginationToken: string | undefined;
   for (let page = 0; page < 5; page += 1) {
-    const query = new URLSearchParams({ max_results: "100", event_types: "MessageCreate", "dm_event.fields": "created_at,dm_conversation_id,sender_id,text", expansions: "sender_id", "user.fields": "name,username,verified,description,public_metrics" });
+    const query = new URLSearchParams({ max_results: "100", event_types: "MessageCreate", "dm_event.fields": "created_at,dm_conversation_id,participant_ids,sender_id,text", expansions: "sender_id", "user.fields": "name,username,verified,description,public_metrics" });
     if (paginationToken) query.set("pagination_token", paginationToken);
     const response = await fetch(`https://api.x.com/2/dm_events?${query}`, { headers: { Authorization: `Bearer ${token}` } });
     const payload = await response.json() as { data?: XEvent[]; includes?: { users?: XUser[] }; errors?: Array<{ detail?: string }>; meta?: { next_token?: string } };
@@ -119,7 +120,7 @@ export async function syncX(ownerId: string, config: Config) {
   const keywords = (keywordRows ?? []).map((row) => String(row.normalized_phrase));
   const latestByConversation = new Map<string, XEvent>();
   for (const event of events) {
-    const key = event.dm_conversation_id ?? event.id;
+    const key = conversationKey(event);
     const existing = latestByConversation.get(key);
     if (!existing || new Date(event.created_at ?? 0).getTime() > new Date(existing.created_at ?? 0).getTime()) latestByConversation.set(key, event);
   }
@@ -127,7 +128,7 @@ export async function syncX(ownerId: string, config: Config) {
   const rows = events.map((event) => {
     const sender = users.get(event.sender_id ?? "");
     const inbound = event.sender_id !== item.x_user_id;
-    const isLatestInbound = latestByConversation.get(event.dm_conversation_id ?? event.id)?.id === event.id && inbound;
+    const isLatestInbound = latestByConversation.get(conversationKey(event))?.id === event.id && inbound;
     const senderFollowed = Boolean(event.sender_id && follows.has(event.sender_id));
     const matchesKeyword = keywordMatch(event.text ?? "", keywords);
     const scored = classify(event, senderFollowed, sender, isLatestInbound, matchesKeyword);
