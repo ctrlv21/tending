@@ -122,10 +122,10 @@ async function testXFeedForOwner(ownerId: string, config: Config) {
   if (!item || item.status !== "connected") throw new Error("Connect X before testing its API feed.");
   const token = await accessToken(item, config);
   const query = new URLSearchParams({ max_results: "100", "dm_event.fields": "created_at,sender_id,text,dm_conversation_id" });
-  const apiResponse = await fetch(`https://api.x.com/2/dm_events?${query}`, { headers: { Authorization: `Bearer ${token}` } });
+  const [apiResponse, activity] = await Promise.all([fetch(`https://api.x.com/2/dm_events?${query}`, { headers: { Authorization: `Bearer ${token}` } }), activitySubscriptionStatus(item, config)]);
   const payload = await apiResponse.json() as { data?: XEvent[]; errors?: Array<{ detail?: string; title?: string }> };
   const timestamps = (payload.data ?? []).map((event) => event.created_at).filter((value): value is string => Boolean(value)).sort();
-  return { ok: apiResponse.ok, status: apiResponse.status, eventCount: payload.data?.length ?? 0, newestEventAt: timestamps[timestamps.length - 1] ?? null, requestId: apiResponse.headers.get("x-request-id") || apiResponse.headers.get("x-transaction-id"), error: apiResponse.ok ? null : payload.errors?.[0]?.detail || payload.errors?.[0]?.title || "X rejected the test request." };
+  return { ok: apiResponse.ok, status: apiResponse.status, eventCount: payload.data?.length ?? 0, newestEventAt: timestamps[timestamps.length - 1] ?? null, requestId: apiResponse.headers.get("x-request-id") || apiResponse.headers.get("x-transaction-id"), activity, error: apiResponse.ok ? null : payload.errors?.[0]?.detail || payload.errors?.[0]?.title || "X rejected the test request." };
 }
 
 function xActivityTag(ownerId: string, eventType: "chat.received" | "chat.sent") { return `tending:${ownerId}:${eventType}`; }
@@ -162,6 +162,15 @@ async function ensureActivitySubscriptions(ownerId: string, item: Connection, us
     if (!response.ok) throw new Error(activityError(payload, `X could not subscribe to ${eventType}.`));
   }
   return { enabled: true, webhookId: webhook.id };
+}
+async function activitySubscriptionStatus(item: Connection, config: Config) {
+  if (!config.appBearerToken) return { ready: false, reason: "X_APP_BEARER_TOKEN is missing." };
+  const response = await fetch("https://api.x.com/2/activity/subscriptions", { headers: { Authorization: `Bearer ${config.appBearerToken}` } });
+  const payload = await xJson(response) as { data?: Array<{ event_type?: string; filter?: { user_id?: string } }> };
+  if (!response.ok) return { ready: false, reason: activityError(payload, "X Activity is not available for this app.") };
+  const types = new Set((payload.data ?? []).filter((subscription) => subscription.filter?.user_id === item.x_user_id).map((subscription) => subscription.event_type));
+  const missing = ["chat.received", "chat.sent"].filter((type) => !types.has(type));
+  return missing.length ? { ready: false, reason: `Missing ${missing.join(" and ")}. Reconnect X to retry setup.` } : { ready: true };
 }
 
 async function rawBody(request: RequestLike) {
