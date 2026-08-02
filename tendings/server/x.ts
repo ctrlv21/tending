@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { createServerSupabaseClient } from "../../server/supabaseServer.js";
+import { analyzeMessages, type MessageAnalysis } from "./messageAnalysis.js";
 
 type RequestLike = { headers?: Record<string, string | string[] | undefined>; query?: Record<string, string | string[] | undefined> };
 type ResponseLike = { status: (code: number) => ResponseLike; json: (payload: unknown) => unknown; redirect: (code: number, location: string) => unknown; setHeader: (name: string, value: string | string[]) => void };
@@ -64,7 +65,7 @@ function botScore(sender: XUser | undefined) {
   if (!sender.verified && followers < 8) score += 2;
   return score;
 }
-function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefined, isLatestInbound: boolean, matchesKeyword: boolean) {
+function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefined, isLatestInbound: boolean, matchesKeyword: boolean, analysis?: MessageAnalysis) {
   const text = event.text ?? "";
   const directAsk = hasReplySignal(text);
   const risk = spamScore(text) + botScore(sender);
@@ -76,7 +77,7 @@ function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefi
   if (sender?.verified) relevance += 1;
   if ((sender?.public_metrics?.followers_count ?? 0) > 100) relevance += 1;
   relevance -= risk;
-  const classification: Classification = !isLatestInbound
+  const deterministic: Classification = !isLatestInbound
     ? "not_pending"
     : risk >= 2
       ? "filtered"
@@ -85,7 +86,8 @@ function classify(event: XEvent, senderFollowed: boolean, sender: XUser | undefi
         : matchesKeyword
           ? "worth_a_look"
           : "filtered";
-  return { classification, relevance, risk };
+  const classification: Classification = !isLatestInbound || !analysis ? deterministic : analysis.urgency === "ignore" ? "filtered" : analysis.urgency === "urgent" || analysis.urgency === "reply" ? "needs_reply" : "worth_a_look";
+  return { classification, relevance: Math.max(relevance, analysis?.score ?? 0), risk };
 }
 async function followedIds(token: string, userId: string) {
   const following = new Set<string>();
@@ -132,6 +134,11 @@ export async function syncX(ownerId: string, config: Config) {
     const existing = latestByConversation.get(key);
     if (!existing || new Date(event.created_at ?? 0).getTime() > new Date(existing.created_at ?? 0).getTime()) latestByConversation.set(key, event);
   }
+  const analyses = await analyzeMessages(events.filter((event) => {
+    const inbound = event.sender_id !== item.x_user_id;
+    const latest = latestByConversation.get(conversationKey(event, item.x_user_id))?.id === event.id;
+    return inbound && latest && spamScore(event.text ?? "") + botScore(users.get(event.sender_id ?? "")) < 2;
+  }).sort((a, b) => new Date(b.created_at ?? 0).getTime() - new Date(a.created_at ?? 0).getTime()).map((event) => ({ id: event.id, source: "x" as const, text: event.text ?? "", ageHours: Math.max(0, Math.round((Date.now() - new Date(event.created_at ?? Date.now()).getTime()) / 3_600_000)), watchWord: keywordMatch(event.text ?? "", keywords) })));
   const now = new Date().toISOString();
   const rows = events.map((event) => {
     const sender = users.get(event.sender_id ?? "");
@@ -139,8 +146,9 @@ export async function syncX(ownerId: string, config: Config) {
     const isLatestInbound = latestByConversation.get(conversationKey(event, item.x_user_id))?.id === event.id && inbound;
     const senderFollowed = Boolean(event.sender_id && follows.has(event.sender_id));
     const matchesKeyword = keywordMatch(event.text ?? "", keywords);
-    const scored = classify(event, senderFollowed, sender, isLatestInbound, matchesKeyword);
-    return { owner_id: ownerId, x_event_id: event.id, conversation_id: event.dm_conversation_id ?? null, sender_id: event.sender_id ?? null, sender_name: sender?.name || sender?.username || (inbound ? "X user" : "You"), text: event.text ?? "", created_at_x: event.created_at ?? now, inbound, reply_worthy: scored.classification === "needs_reply", classification: scored.classification, relevance_score: scored.relevance, spam_score: scored.risk, sender_followed: senderFollowed, keyword_match: matchesKeyword, source_url: event.dm_conversation_id ? `https://x.com/messages/${event.dm_conversation_id}` : "https://x.com/messages", updated_at: now };
+    const analysis = analyses.get(event.id);
+    const scored = classify(event, senderFollowed, sender, isLatestInbound, matchesKeyword, analysis);
+    return { owner_id: ownerId, x_event_id: event.id, conversation_id: event.dm_conversation_id ?? null, sender_id: event.sender_id ?? null, sender_name: sender?.name || sender?.username || (inbound ? "X user" : "You"), text: event.text ?? "", created_at_x: event.created_at ?? now, inbound, reply_worthy: scored.classification === "needs_reply", classification: scored.classification, relevance_score: scored.relevance, spam_score: scored.risk, sender_followed: senderFollowed, keyword_match: matchesKeyword, analysis_reason: analysis?.reason ?? null, analysis_provider: analysis ? "anthropic" : null, analyzed_at: analysis ? now : null, source_url: event.dm_conversation_id ? `https://x.com/messages/${event.dm_conversation_id}` : "https://x.com/messages", updated_at: now };
   });
   const { error: clearError } = await db(config).from("tending_x_events").update({ reply_worthy: false, classification: "not_pending", updated_at: now }).eq("owner_id", ownerId);
   if (clearError) throw clearError;
@@ -152,4 +160,4 @@ export async function syncX(ownerId: string, config: Config) {
   return rows.filter((row) => row.classification !== "not_pending").length;
 }
 export async function xSync(request: RequestLike, response: ResponseLike) { try { const config = getConfig(); const user = await currentUser(request, config); return response.status(200).json({ synced: true, count: await syncX(user.id, config) }); } catch (error) { return response.status(400).json({ synced: false, error: error instanceof Error ? error.message : "X could not refresh." }); } }
-export async function xEvents(request: RequestLike, response: ResponseLike) { try { const config = getConfig(); const user = await currentUser(request, config); const { data, error } = await db(config).from("tending_x_events").select("x_event_id, sender_name, text, created_at_x, reply_worthy, classification, sender_followed, keyword_match, source_url").eq("owner_id", user.id).eq("inbound", true).in("classification", ["needs_reply", "worth_a_look"]).order("created_at_x", { ascending: false }).limit(100); if (error) throw error; return response.status(200).json({ events: data ?? [] }); } catch (error) { return response.status(400).json({ events: [], error: error instanceof Error ? error.message : "X messages could not be loaded." }); } }
+export async function xEvents(request: RequestLike, response: ResponseLike) { try { const config = getConfig(); const user = await currentUser(request, config); const { data, error } = await db(config).from("tending_x_events").select("x_event_id, sender_name, text, created_at_x, reply_worthy, classification, sender_followed, keyword_match, analysis_reason, source_url").eq("owner_id", user.id).eq("inbound", true).in("classification", ["needs_reply", "worth_a_look"]).order("relevance_score", { ascending: false }).order("created_at_x", { ascending: false }).limit(100); if (error) throw error; return response.status(200).json({ events: data ?? [] }); } catch (error) { return response.status(400).json({ events: [], error: error instanceof Error ? error.message : "X messages could not be loaded." }); } }

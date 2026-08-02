@@ -139,11 +139,11 @@ const VIEW_LABELS: Record<Bucket, string> = {
 };
 
 type GmailStatus = { configured: boolean; connected: boolean; status: string; email: string | null; emails?: string[]; lastSyncedAt: string | null; message?: string };
-type GmailThread = { gmail_thread_id: string; sender: string; subject: string; snippet: string; latest_message_at: string; unread: boolean; reply_worthy: boolean; source_url: string; importance_score: number; urgency: Priority; priority_person: boolean; keyword_match: boolean };
+type GmailThread = { gmail_thread_id: string; sender: string; subject: string; snippet: string; latest_message_at: string; unread: boolean; reply_worthy: boolean; source_url: string; importance_score: number; urgency: Priority; priority_person: boolean; keyword_match: boolean; analysis_reason?: string | null };
 type PriorityPerson = { id: string; identifier: string; label: string };
 type PrioritySuggestion = { identifier: string; label: string };
 type XStatus = { configured: boolean; connected: boolean; status: string; username: string | null; message?: string };
-type XEvent = { x_event_id: string; sender_name: string; text: string; created_at_x: string; reply_worthy: boolean; classification: "needs_reply" | "worth_a_look"; sender_followed: boolean; keyword_match: boolean; source_url: string };
+type XEvent = { x_event_id: string; sender_name: string; text: string; created_at_x: string; reply_worthy: boolean; classification: "needs_reply" | "worth_a_look"; sender_followed: boolean; keyword_match: boolean; analysis_reason?: string | null; source_url: string };
 type WatchKeyword = { id: string; phrase: string; source: "gmail" | "x" };
 
 function priorityLabel(priority: Priority) {
@@ -306,6 +306,7 @@ export default function TendingPrototype() {
             reasons: [
               ...(thread.priority_person ? ["A person on your priority list sent this"] : []),
               ...(thread.keyword_match ? ["Matches one of your Gmail watch words"] : []),
+              ...(thread.analysis_reason ? [thread.analysis_reason] : []),
               ...(thread.reply_worthy ? ["Contains a question, request, or direct follow-up"] : []),
               ...(thread.urgency === "urgent" ? ["Language or timing suggests this is time-sensitive"] : []),
               ...(thread.unread ? ["Still unread in Gmail"] : []),
@@ -351,7 +352,7 @@ export default function TendingPrototype() {
           priority: event.reply_worthy ? "reply" : "watch",
           bucket: event.reply_worthy ? "needs_reply" : "unread",
           reason: event.reply_worthy ? "contains a request" : "worth a look",
-          reasons: ["Latest message is from this sender", ...(event.sender_followed ? ["You follow this account"] : []), ...(event.keyword_match ? ["Matches one of your X watch words"] : []), ...(event.reply_worthy ? ["Contains a question or request"] : ["Not classified as likely promotion"])],
+          reasons: ["Latest message is from this sender", ...(event.sender_followed ? ["You follow this account"] : []), ...(event.keyword_match ? ["Matches one of your X watch words"] : []), ...(event.analysis_reason ? [event.analysis_reason] : []), ...(event.reply_worthy ? ["Contains a question or request"] : ["Not classified as likely promotion"])],
           detail: event.text,
           sourceUrl: event.source_url,
         }));
