@@ -1,6 +1,6 @@
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-import { gmailCallback, gmailStart, gmailStatus, gmailSync, gmailThreads } from "./tendings/server/gmail";
+import { gmailCallback, gmailSenders, gmailStart, gmailStatus, gmailSync, gmailThreads } from "./tendings/server/gmail";
 import { xCallback, xEvents, xStart, xStatus, xSync } from "./tendings/server/x";
 import { priorities } from "./tendings/server/priorities";
 import { keywords } from "./tendings/server/keywords";
@@ -28,6 +28,7 @@ function localApi(): Plugin {
         if (action === "start") return gmailStart(requestWithQuery, adapted);
         if (action === "callback") return gmailCallback(requestWithQuery, adapted);
         if (action === "sync") return gmailSync(requestWithQuery, adapted);
+        if (action === "senders") return gmailSenders(requestWithQuery, adapted);
         if (action === "threads") return gmailThreads(requestWithQuery, adapted);
         next();
       });

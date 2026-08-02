@@ -177,6 +177,7 @@ export default function TendingPrototype() {
   const [priorityBusy, setPriorityBusy] = useState(false);
   const [watchWords, setWatchWords] = useState<Record<"gmail" | "x", WatchKeyword[]>>({ gmail: [], x: [] });
   const [watchDrafts, setWatchDrafts] = useState<Record<"gmail" | "x", string>>({ gmail: "", x: "" });
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     if (!tendingSupabase) {
@@ -232,7 +233,7 @@ export default function TendingPrototype() {
     }
     let cancelled = false;
     const timeout = window.setTimeout(() => {
-      void gmailFetch(`/api/tending/priorities?search=${encodeURIComponent(priorityDraft.trim())}`).then(async (response) => {
+      void gmailFetch(`/api/tending/gmail/senders?query=${encodeURIComponent(priorityDraft.trim())}`).then(async (response) => {
         const payload = await response.json() as { suggestions?: PrioritySuggestion[] };
         if (!cancelled && response.ok) setPrioritySuggestions(payload.suggestions ?? []);
       }).catch(() => { if (!cancelled) setPrioritySuggestions([]); });
@@ -467,6 +468,25 @@ export default function TendingPrototype() {
     } catch { setToast("Gmail could not refresh right now."); }
   }
 
+  async function syncAllNow() {
+    const sources = [
+      ...(gmail?.connected ? [{ label: "Gmail", path: "/api/tending/gmail/sync" }] : []),
+      ...(x?.connected ? [{ label: "X DMs", path: "/api/tending/x/sync" }] : []),
+    ];
+    if (!sources.length) { setConnectionsOpen(true); setToast("Connect a source first, then Tending can refresh everything together."); return; }
+    setRefreshing(true);
+    try {
+      const results = await Promise.all(sources.map(async (source) => {
+        const response = await gmailFetch(source.path, { method: "POST" });
+        const payload = await response.json() as { synced?: boolean; count?: number };
+        return payload.synced ? `${source.label}: ${payload.count ?? 0}` : `${source.label}: not refreshed`;
+      }));
+      setToast(`Everything refreshed — ${results.join(" · ")}.`);
+      window.setTimeout(() => window.location.reload(), 650);
+    } catch { setToast("One of your sources could not refresh. Please try again."); }
+    finally { setRefreshing(false); }
+  }
+
   async function addPriorityPerson(candidate?: PrioritySuggestion) {
     const identifier = candidate?.identifier ?? priorityDraft.trim();
     if (!identifier || priorityBusy) return;
@@ -577,7 +597,7 @@ export default function TendingPrototype() {
               <p className="eyebrow">{activeView === "needs_reply" ? "YOUR FOLLOW-THROUGH" : "TODAY'S INBOX"}</p>
               <h1>{activeView === "needs_reply" && counts.needs_reply ? <>A small number of things <span className="heading-tail"><em>need&nbsp;you.</em></span></> : activeView === "unread" ? <>New things, <em>no rush.</em></> : activeView === "waiting" ? <>You chose to <em>come back.</em></> : <>A little <em>lighter.</em></>}</h1>
             </div>
-            <button className="queue-refresh" onClick={gmail?.connected ? syncGmailNow : () => setToast("Connect Gmail when you’re ready — fixtures are shown for now.")}>↻ <span>Refresh</span></button>
+            <button className="queue-refresh" onClick={syncAllNow} disabled={refreshing}>↻ <span>{refreshing ? "Refreshing…" : "Refresh all"}</span></button>
           </div>
 
           {visible.length ? (
