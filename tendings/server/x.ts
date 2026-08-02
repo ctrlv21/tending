@@ -46,7 +46,8 @@ async function probeDMFeed(token: string): Promise<XProbe[]> {
     try {
       const response = await fetch(`https://api.x.com/2/dm_events?${query}`, { headers: { Authorization: `Bearer ${token}` } });
       const payload = await response.json() as { data?: XEvent[]; errors?: Array<{ detail?: string; title?: string }> };
-      const newestEventAt = (payload.data ?? []).map((event) => event.created_at).filter((value): value is string => Boolean(value)).sort().at(-1) ?? null;
+      const timestamps = (payload.data ?? []).map((event) => event.created_at).filter((value): value is string => Boolean(value)).sort();
+      const newestEventAt = timestamps[timestamps.length - 1] ?? null;
       return { variant, status: response.status, resultCount: payload.data?.length ?? 0, newestEventAt, requestId: response.headers.get("x-request-id") || response.headers.get("x-transaction-id"), error: response.ok ? null : payload.errors?.[0]?.detail || payload.errors?.[0]?.title || "X rejected this variant." };
     } catch (error) { return { variant, status: 0, resultCount: 0, newestEventAt: null, requestId: null, error: error instanceof Error ? error.message : "Probe request failed." }; }
   }));
@@ -152,7 +153,8 @@ export async function syncX(ownerId: string, config: Config) {
     paginationToken = payload.meta?.next_token;
     if (!paginationToken) break;
   }
-  const newestRawInboundAt = events.filter((event) => event.sender_id !== item.x_user_id).map((event) => event.created_at).filter((value): value is string => Boolean(value)).sort().at(-1) ?? null;
+  const rawInboundTimestamps = events.filter((event) => event.sender_id !== item.x_user_id).map((event) => event.created_at).filter((value): value is string => Boolean(value)).sort();
+  const newestRawInboundAt = rawInboundTimestamps[rawInboundTimestamps.length - 1] ?? null;
   const sourceDelayed = !newestRawInboundAt || Date.now() - new Date(newestRawInboundAt).getTime() > 36 * 3_600_000;
   const probes = sourceDelayed ? await probeDMFeed(token) : [];
   if (probes.length) {
