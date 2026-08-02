@@ -34,6 +34,23 @@ async function accessToken(item: Connection, config: Config) { if (new Date(item
 type XEvent = { id: string; sender_id?: string; text?: string; created_at?: string; dm_conversation_id?: string; participant_ids?: string[] };
 type XUser = { id: string; name?: string; username?: string; verified?: boolean; description?: string; public_metrics?: { followers_count?: number; following_count?: number } };
 type Classification = "needs_reply" | "worth_a_look" | "filtered" | "not_pending";
+type XProbe = { variant: "bare" | "fields" | "enriched"; status: number; resultCount: number; newestEventAt: string | null; requestId: string | null; error: string | null };
+
+async function probeDMFeed(token: string): Promise<XProbe[]> {
+  const variants: Array<{ variant: XProbe["variant"]; query: URLSearchParams }> = [
+    { variant: "bare", query: new URLSearchParams({ max_results: "100" }) },
+    { variant: "fields", query: new URLSearchParams({ max_results: "100", "dm_event.fields": "created_at,sender_id,text,dm_conversation_id" }) },
+    { variant: "enriched", query: new URLSearchParams({ max_results: "100", event_types: "MessageCreate", "dm_event.fields": "created_at,dm_conversation_id,participant_ids,sender_id,text", expansions: "sender_id", "user.fields": "name,username,verified,description,public_metrics" }) },
+  ];
+  return Promise.all(variants.map(async ({ variant, query }) => {
+    try {
+      const response = await fetch(`https://api.x.com/2/dm_events?${query}`, { headers: { Authorization: `Bearer ${token}` } });
+      const payload = await response.json() as { data?: XEvent[]; errors?: Array<{ detail?: string; title?: string }> };
+      const newestEventAt = (payload.data ?? []).map((event) => event.created_at).filter((value): value is string => Boolean(value)).sort().at(-1) ?? null;
+      return { variant, status: response.status, resultCount: payload.data?.length ?? 0, newestEventAt, requestId: response.headers.get("x-request-id") || response.headers.get("x-transaction-id"), error: response.ok ? null : payload.errors?.[0]?.detail || payload.errors?.[0]?.title || "X rejected this variant." };
+    } catch (error) { return { variant, status: 0, resultCount: 0, newestEventAt: null, requestId: null, error: error instanceof Error ? error.message : "Probe request failed." }; }
+  }));
+}
 
 function hasReplySignal(text: string) { return /\?|\b(can you|could you|would you|please|let me know|thoughts\?|confirm|urgent|asap|deadline|today|tomorrow|time-sensitive|important|need your|action required)\b/i.test(text); }
 function keywordMatch(text: string, words: string[]) { const lower = text.toLowerCase(); return words.some((word) => lower.includes(word)); }
@@ -135,6 +152,12 @@ export async function syncX(ownerId: string, config: Config) {
     paginationToken = payload.meta?.next_token;
     if (!paginationToken) break;
   }
+  const newestRawInboundAt = events.filter((event) => event.sender_id !== item.x_user_id).map((event) => event.created_at).filter((value): value is string => Boolean(value)).sort().at(-1) ?? null;
+  const sourceDelayed = !newestRawInboundAt || Date.now() - new Date(newestRawInboundAt).getTime() > 36 * 3_600_000;
+  const probes = sourceDelayed ? await probeDMFeed(token) : [];
+  if (probes.length) {
+    await db(config).from("tending_x_sync_probes").insert({ owner_id: ownerId, global_newest_event_at: newestRawInboundAt, details: probes });
+  }
   const follows = await followedIds(token, item.x_user_id);
   const { data: keywordRows } = await db(config).from("tending_watch_keywords").select("normalized_phrase").eq("owner_id", ownerId).eq("source", "x");
   const keywords = (keywordRows ?? []).map((row) => String(row.normalized_phrase));
@@ -177,6 +200,7 @@ export async function syncX(ownerId: string, config: Config) {
     count: rows.filter((row) => row.classification !== "not_pending").length,
     latestEventAt: newestInbound,
     dataFreshness: !newestInbound ? "no_messages" : Date.now() - new Date(newestInbound).getTime() > 36 * 3_600_000 ? "delayed" : "current",
+    probes,
   };
 }
 export async function xSync(request: RequestLike, response: ResponseLike) { try { const config = getConfig(); const user = await currentUser(request, config); const result = await syncX(user.id, config); return response.status(200).json({ synced: true, ...result }); } catch (error) { return response.status(400).json({ synced: false, error: error instanceof Error ? error.message : "X could not refresh." }); } }

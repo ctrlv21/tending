@@ -108,6 +108,15 @@ create table if not exists public.tending_x_events (
 create index if not exists tending_x_oauth_states_expiry_idx on public.tending_x_oauth_states (expires_at);
 create index if not exists tending_x_events_queue_idx on public.tending_x_events (owner_id, reply_worthy desc, inbound desc, created_at_x desc);
 
+create table if not exists public.tending_x_sync_probes (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references auth.users(id) on delete cascade,
+  global_newest_event_at timestamptz,
+  details jsonb not null default '[]'::jsonb,
+  created_at timestamptz not null default now()
+);
+create index if not exists tending_x_sync_probes_owner_created_idx on public.tending_x_sync_probes (owner_id, created_at desc);
+
 alter table public.tending_profiles enable row level security;
 alter table public.tending_gmail_oauth_states enable row level security;
 alter table public.tending_gmail_connections enable row level security;
@@ -115,6 +124,7 @@ alter table public.tending_gmail_threads enable row level security;
 alter table public.tending_x_oauth_states enable row level security;
 alter table public.tending_x_connections enable row level security;
 alter table public.tending_x_events enable row level security;
+alter table public.tending_x_sync_probes enable row level security;
 
 create table if not exists public.tending_watch_keywords (
   id uuid primary key default gen_random_uuid(),
@@ -135,6 +145,7 @@ revoke all on table public.tending_gmail_threads from anon, authenticated;
 revoke all on table public.tending_x_oauth_states from anon, authenticated;
 revoke all on table public.tending_x_connections from anon, authenticated;
 revoke all on table public.tending_x_events from anon, authenticated;
+revoke all on table public.tending_x_sync_probes from anon, authenticated;
 revoke all on table public.tending_watch_keywords from anon, authenticated;
 
 create table if not exists public.tending_priority_people (
