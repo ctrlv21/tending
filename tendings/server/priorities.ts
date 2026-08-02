@@ -1,4 +1,5 @@
 import { createServerSupabaseClient } from "../../server/supabaseServer.js";
+import { gmailSenders } from "./gmail.js";
 
 type RequestLike = { headers?: Record<string, string | string[] | undefined>; query?: Record<string, string | string[] | undefined>; method?: string };
 type ResponseLike = { status: (code: number) => ResponseLike; json: (payload: unknown) => unknown };
@@ -11,18 +12,10 @@ export async function priorities(request: RequestLike, response: ResponseLike) {
     const { user: owner, client } = await user(request);
     const search = String(first(request.query?.search) ?? "").trim().slice(0, 80);
     if (request.method === "GET" && search.length >= 2) {
-      const escaped = search.replace(/[,%()]/g, " ");
-      const { data, error } = await client.from("tending_gmail_threads").select("sender, sender_email").eq("owner_id", owner.id).eq("suppressed", false).or(`sender.ilike.%${escaped}%,sender_email.ilike.%${escaped}%`).order("latest_message_at", { ascending: false }).limit(30);
-      if (error) throw error;
-      const seen = new Set<string>();
-      const suggestions = (data ?? []).flatMap((row) => {
-        const identifier = String(row.sender_email ?? "").trim();
-        const name = String(row.sender ?? "").trim();
-        if (!identifier || seen.has(identifier)) return [];
-        seen.add(identifier);
-        return [{ identifier, label: name || identifier }];
-      }).slice(0, 6);
-      return response.status(200).json({ suggestions });
+      let status = 200; let payload: unknown = { suggestions: [] };
+      const relay = { status(code: number) { status = code; return relay; }, json(value: unknown) { payload = value; }, redirect() { return undefined; }, setHeader() { return undefined; } };
+      await gmailSenders({ ...request, query: { ...request.query, query: search } }, relay);
+      return response.status(status).json(payload);
     }
     if (request.method === "POST") {
       const identifier = String(first(request.query?.identifier) ?? "").replace(/^@/, "").trim();

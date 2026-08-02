@@ -233,7 +233,7 @@ export default function TendingPrototype() {
     }
     let cancelled = false;
     const timeout = window.setTimeout(() => {
-      void gmailFetch(`/api/tending/gmail/senders?query=${encodeURIComponent(priorityDraft.trim())}`).then(async (response) => {
+      void gmailFetch(`/api/tending/priorities?search=${encodeURIComponent(priorityDraft.trim())}`).then(async (response) => {
         const payload = await response.json() as { suggestions?: PrioritySuggestion[] };
         if (!cancelled && response.ok) setPrioritySuggestions(payload.suggestions ?? []);
       }).catch(() => { if (!cancelled) setPrioritySuggestions([]); });
